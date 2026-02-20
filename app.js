@@ -10,6 +10,10 @@ const STORAGE_KEYS = {
 
 const defaultApiBase = "https://pkeday-brokerage-insights-api.onrender.com";
 const notificationsApiBaseFallback = defaultApiBase;
+const legacyApiBases = new Set([
+  "https://pkeday-ai-webapp-brokerage-api.onrender.com",
+  "https://pkeday-ai-webapp-api.onrender.com"
+]);
 const fallbackAiCategories = [
   "earnings_results_boardmeeting",
   "results_intimation_date",
@@ -182,7 +186,7 @@ const seedReports = [
 const state = {
   section: "brokerage",
   view: "dashboard",
-  apiBase: loadString(STORAGE_KEYS.apiBase, defaultApiBase),
+  apiBase: loadApiBase(),
   auth: {
     token: loadString(STORAGE_KEYS.authToken, ""),
     user: null,
@@ -2635,9 +2639,8 @@ async function apiFetchFromBase(endpoint, apiBase, options = {}, clearAuthOnUnau
     request.body = options.body;
   }
 
-  const notificationsBase = notificationsApiBaseFallback.replace(/\/$/, "");
   const normalizedBase = String(apiBase || "").replace(/\/$/, "");
-  const shouldAttachAuth = Boolean(state.auth.token) && normalizedBase !== notificationsBase;
+  const shouldAttachAuth = Boolean(state.auth.token) && options.attachAuth !== false;
   if (shouldAttachAuth) {
     request.headers.Authorization = `Bearer ${state.auth.token}`;
   }
@@ -2849,6 +2852,19 @@ function persistList(key, value) {
 function loadString(key, fallback) {
   const value = localStorage.getItem(key);
   return value && value.trim() ? value : fallback;
+}
+
+function loadApiBase() {
+  const normalizedDefault = defaultApiBase.replace(/\/$/, "");
+  const stored = loadString(STORAGE_KEYS.apiBase, normalizedDefault).replace(/\/$/, "");
+  if (!stored) {
+    return normalizedDefault;
+  }
+  if (legacyApiBases.has(stored)) {
+    localStorage.setItem(STORAGE_KEYS.apiBase, normalizedDefault);
+    return normalizedDefault;
+  }
+  return stored;
 }
 
 function loadDictionary() {
