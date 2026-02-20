@@ -205,6 +205,8 @@ const state = {
     scheduleEnabled: true,
     scheduleTime: "07:30",
     scheduleTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Kolkata",
+    dateFrom: "",
+    dateTo: "",
     startFromNow: true,
     resetCursor: false,
     statusMessage: ""
@@ -292,6 +294,8 @@ const refs = {
   ingestSetupClearAllBtn: document.getElementById("ingest-setup-clear-all-btn"),
   ingestSetupQuery: document.getElementById("ingest-setup-query"),
   ingestSetupMaxResults: document.getElementById("ingest-setup-max-results"),
+  ingestSetupDateFrom: document.getElementById("ingest-setup-date-from"),
+  ingestSetupDateTo: document.getElementById("ingest-setup-date-to"),
   ingestSetupTime: document.getElementById("ingest-setup-time"),
   ingestSetupTimezone: document.getElementById("ingest-setup-timezone"),
   ingestSetupStartNow: document.getElementById("ingest-setup-start-now"),
@@ -1605,6 +1609,29 @@ function parseScheduleTime(value) {
   return { hour, minute };
 }
 
+function normalizeDateInput(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return "";
+  }
+
+  const parsed = new Date(`${raw}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime())) {
+    return "";
+  }
+
+  if (parsed.toISOString().slice(0, 10) !== raw) {
+    return "";
+  }
+
+  return raw;
+}
+
 function formatScheduleTime(hour, minute) {
   const safeHour = Math.max(0, Math.min(23, Number.parseInt(String(hour ?? 0), 10) || 0));
   const safeMinute = Math.max(0, Math.min(59, Number.parseInt(String(minute ?? 0), 10) || 0));
@@ -1633,6 +1660,8 @@ async function loadIngestSetupData(fetchLabels = true) {
   state.ingestSetup.scheduleTimezone = String(
     prefs.scheduleTimezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Kolkata"
   );
+  state.ingestSetup.dateFrom = normalizeDateInput(prefs.ingestFromDate);
+  state.ingestSetup.dateTo = normalizeDateInput(prefs.ingestToDate);
   state.ingestSetup.statusMessage = `Loaded ${labels.length} labels. ${trackedIds.length} currently tracked.`;
 }
 
@@ -1645,6 +1674,8 @@ function renderIngestSetupModal() {
 
   refs.ingestSetupQuery.value = state.ingestSetup.query;
   refs.ingestSetupMaxResults.value = String(state.ingestSetup.maxResults || 30);
+  refs.ingestSetupDateFrom.value = state.ingestSetup.dateFrom || "";
+  refs.ingestSetupDateTo.value = state.ingestSetup.dateTo || "";
   refs.ingestSetupTime.value = state.ingestSetup.scheduleTime || "07:30";
   refs.ingestSetupTimezone.value = state.ingestSetup.scheduleTimezone || "Asia/Kolkata";
   refs.ingestSetupStartNow.checked = state.ingestSetup.startFromNow;
@@ -1731,9 +1762,26 @@ async function saveIngestSetup() {
   const selectedLabelNames = state.ingestSetup.labels
     .filter((label) => selectedLabelIds.includes(label.id))
     .map((label) => label.name);
+  const query = refs.ingestSetupQuery.value.trim();
+  const maxResults = Math.max(1, Math.min(100, Number(refs.ingestSetupMaxResults.value || state.ingestSetup.maxResults || 30)));
   const scheduleTime = parseScheduleTime(refs.ingestSetupTime.value);
+  const scheduleTimezone = refs.ingestSetupTimezone.value.trim() || "Asia/Kolkata";
+  const ingestFromDate = normalizeDateInput(refs.ingestSetupDateFrom.value);
+  const ingestToDate = normalizeDateInput(refs.ingestSetupDateTo.value);
   const startFromNow = refs.ingestSetupStartNow.checked;
   const resetCursor = refs.ingestSetupResetCursor.checked;
+  if (ingestFromDate && ingestToDate && ingestFromDate > ingestToDate) {
+    state.ingestSetup.statusMessage = "Ingest start date cannot be after end date.";
+    renderIngestSetupModal();
+    return;
+  }
+
+  state.ingestSetup.query = query;
+  state.ingestSetup.maxResults = maxResults;
+  state.ingestSetup.scheduleTime = formatScheduleTime(scheduleTime.hour, scheduleTime.minute);
+  state.ingestSetup.scheduleTimezone = scheduleTimezone;
+  state.ingestSetup.dateFrom = ingestFromDate;
+  state.ingestSetup.dateTo = ingestToDate;
   state.ingestSetup.startFromNow = startFromNow;
   state.ingestSetup.resetCursor = resetCursor;
 
@@ -1745,25 +1793,31 @@ async function saveIngestSetup() {
     await apiFetch("/api/gmail/preferences", {
       method: "PUT",
       body: JSON.stringify({
-        query: refs.ingestSetupQuery.value.trim(),
-        maxResults: Math.max(1, Math.min(100, Number(refs.ingestSetupMaxResults.value || 30))),
+        query,
+        maxResults,
         trackedLabelIds: selectedLabelIds,
         trackedLabelNames: selectedLabelNames,
         scheduleEnabled: true,
         scheduleHour: scheduleTime.hour,
         scheduleMinute: scheduleTime.minute,
-        scheduleTimezone: refs.ingestSetupTimezone.value.trim() || "Asia/Kolkata",
+        scheduleTimezone,
+        ingestFromDate: ingestFromDate || null,
+        ingestToDate: ingestToDate || null,
         startFromNow,
         resetCursor
       })
     });
 
     state.ingestSetup.statusMessage = "Ingest setup saved.";
+    const dateFilterPart =
+      ingestFromDate || ingestToDate
+        ? ` Date filter: ${ingestFromDate || "oldest"} to ${ingestToDate || "latest"}.`
+        : "";
     setPipelineMessage(
       `Tracking ${selectedLabelIds.length} labels. Daily ingest at ${formatScheduleTime(
         scheduleTime.hour,
         scheduleTime.minute
-      )} (${refs.ingestSetupTimezone.value.trim() || "Asia/Kolkata"}).`
+      )} (${scheduleTimezone}). Max ${maxResults} messages/run.${dateFilterPart}`
     );
     closeIngestSetupModal();
     await refreshAuthState();

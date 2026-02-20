@@ -288,6 +288,9 @@ function normalizeGmailPreferencesEntry(entry) {
   const nowIso = new Date().toISOString();
   const scheduleHour = Number.parseInt(String(entry?.scheduleHour ?? "7"), 10);
   const scheduleMinute = Number.parseInt(String(entry?.scheduleMinute ?? "30"), 10);
+  const ingestFromDate = normalizeDateOnly(entry?.ingestFromDate);
+  const ingestToDate = normalizeDateOnly(entry?.ingestToDate);
+  const hasInvalidDateRange = Boolean(ingestFromDate && ingestToDate && ingestFromDate > ingestToDate);
 
   return {
     userId: String(entry?.userId ?? ""),
@@ -305,6 +308,8 @@ function normalizeGmailPreferencesEntry(entry) {
     scheduleHour: Number.isInteger(scheduleHour) ? Math.max(0, Math.min(23, scheduleHour)) : 7,
     scheduleMinute: Number.isInteger(scheduleMinute) ? Math.max(0, Math.min(59, scheduleMinute)) : 30,
     scheduleTimezone: typeof entry?.scheduleTimezone === "string" ? entry.scheduleTimezone : "Asia/Kolkata",
+    ingestFromDate: hasInvalidDateRange ? null : ingestFromDate,
+    ingestToDate: hasInvalidDateRange ? null : ingestToDate,
     lastIngestAfterEpoch: Math.max(0, Number.parseInt(String(entry?.lastIngestAfterEpoch ?? "0"), 10) || 0),
     lastScheduledRunDate:
       typeof entry?.lastScheduledRunDate === "string" && entry.lastScheduledRunDate.trim()
@@ -579,6 +584,8 @@ function getOrCreateGmailPreferences(userId) {
       scheduleHour: 7,
       scheduleMinute: 30,
       scheduleTimezone: "Asia/Kolkata",
+      ingestFromDate: null,
+      ingestToDate: null,
       lastIngestAfterEpoch: nowEpoch,
       lastScheduledRunDate: null,
       lastIngestAt: null,
@@ -696,14 +703,74 @@ function isScheduleDueNow(prefs, now = new Date()) {
   return prefs.lastScheduledRunDate !== parts.dateKey;
 }
 
-function composeIngestQuery(baseQuery, afterEpoch) {
+function normalizeDateOnly(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+
+  const year = Number.parseInt(match[1], 10);
+  const month = Number.parseInt(match[2], 10);
+  const day = Number.parseInt(match[3], 10);
+  if (year < 1970 || month < 1 || month > 12 || day < 1 || day > 31) {
+    return null;
+  }
+
+  const utcTime = Date.UTC(year, month - 1, day);
+  const date = new Date(utcTime);
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
+  return `${match[1]}-${match[2]}-${match[3]}`;
+}
+
+function dateOnlyToEpochStart(dateOnlyValue) {
+  const normalized = normalizeDateOnly(dateOnlyValue);
+  if (!normalized) {
+    return null;
+  }
+  return Math.floor(new Date(`${normalized}T00:00:00.000Z`).getTime() / 1000);
+}
+
+function dateOnlyToEpochEndExclusive(dateOnlyValue) {
+  const startEpoch = dateOnlyToEpochStart(dateOnlyValue);
+  if (!Number.isFinite(startEpoch)) {
+    return null;
+  }
+  return startEpoch + 24 * 60 * 60;
+}
+
+function composeIngestQuery(baseQuery, afterEpoch, ingestFromDate = null, ingestToDate = null) {
   const chunks = [];
   if (typeof baseQuery === "string" && baseQuery.trim()) {
     chunks.push(baseQuery.trim());
   }
-  if (Number.isFinite(afterEpoch) && afterEpoch > 0) {
-    chunks.push(`after:${Math.floor(afterEpoch)}`);
+
+  let effectiveAfterEpoch = Number.isFinite(afterEpoch) && afterEpoch > 0 ? Math.floor(afterEpoch) : 0;
+  const fromEpoch = dateOnlyToEpochStart(ingestFromDate);
+  if (Number.isFinite(fromEpoch)) {
+    effectiveAfterEpoch = Math.max(effectiveAfterEpoch, fromEpoch);
   }
+
+  if (effectiveAfterEpoch > 0) {
+    chunks.push(`after:${effectiveAfterEpoch}`);
+  }
+
+  const beforeEpoch = dateOnlyToEpochEndExclusive(ingestToDate);
+  if (Number.isFinite(beforeEpoch) && beforeEpoch > 0) {
+    chunks.push(`before:${beforeEpoch}`);
+  }
+
   return chunks.join(" ").trim();
 }
 
@@ -1534,10 +1601,16 @@ async function handlePutGmailPreferences(req, res, auth) {
   const scheduleHour = Number.parseInt(String(body.scheduleHour ?? prefs.scheduleHour), 10);
   const scheduleMinute = Number.parseInt(String(body.scheduleMinute ?? prefs.scheduleMinute), 10);
   const scheduleTimezone = resolveTimeZone(body.scheduleTimezone ?? prefs.scheduleTimezone);
+  const ingestFromDate = normalizeDateOnly(body.ingestFromDate ?? prefs.ingestFromDate);
+  const ingestToDate = normalizeDateOnly(body.ingestToDate ?? prefs.ingestToDate);
   const resetCursorToNow = body.startFromNow === true;
   const resetCursorToStart = body.resetCursor === true;
 
   const brokerMappings = Array.isArray(body.brokerMappings) ? body.brokerMappings : prefs.brokerMappings;
+  if (ingestFromDate && ingestToDate && ingestFromDate > ingestToDate) {
+    sendJson(req, res, 400, { error: "Ingest start date cannot be after end date." });
+    return;
+  }
 
   prefs.maxResults = Math.max(1, Math.min(100, Number.isFinite(maxResults) ? maxResults : 25));
   prefs.query = query;
@@ -1549,6 +1622,8 @@ async function handlePutGmailPreferences(req, res, auth) {
   prefs.scheduleHour = Number.isInteger(scheduleHour) ? Math.max(0, Math.min(23, scheduleHour)) : 7;
   prefs.scheduleMinute = Number.isInteger(scheduleMinute) ? Math.max(0, Math.min(59, scheduleMinute)) : 30;
   prefs.scheduleTimezone = scheduleTimezone;
+  prefs.ingestFromDate = ingestFromDate;
+  prefs.ingestToDate = ingestToDate;
   if (resetCursorToStart) {
     prefs.lastIngestAfterEpoch = 0;
     prefs.lastScheduledRunDate = null;
@@ -1595,7 +1670,9 @@ async function runGmailIngestForUser(params) {
       ? Math.max(0, Math.floor(parsedAfterEpoch))
       : Math.max(0, Number(params.prefs.lastIngestAfterEpoch ?? 0))
     : Math.max(0, Number(params.prefs.lastIngestAfterEpoch ?? 0));
-  const query = composeIngestQuery(explicitQuery, startAfterEpoch);
+  const ingestFromDate = normalizeDateOnly(params.ingestFromDate ?? params.prefs.ingestFromDate);
+  const ingestToDate = normalizeDateOnly(params.ingestToDate ?? params.prefs.ingestToDate);
+  const query = composeIngestQuery(explicitQuery, startAfterEpoch, ingestFromDate, ingestToDate);
   const accessToken = await getValidGoogleAccessToken(params.connection);
 
   const listResponse = await gmailApiGet(accessToken, "messages", {
@@ -1664,6 +1741,8 @@ async function runGmailIngestForUser(params) {
       cursorAdvanced,
       attachmentCount,
       trackedLabels: labelIds,
+      ingestFromDate,
+      ingestToDate,
       cursorAfterEpoch: params.prefs.lastIngestAfterEpoch
     },
     items: results
@@ -1753,7 +1832,9 @@ async function handleGmailIngest(req, res, auth) {
     maxResults: body.maxResults,
     query: body.query,
     labelIds: body.labelIds,
-    afterEpoch: body.afterEpoch
+    afterEpoch: body.afterEpoch,
+    ingestFromDate: body.ingestFromDate,
+    ingestToDate: body.ingestToDate
   });
 
   await persistDb();
