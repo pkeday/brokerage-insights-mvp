@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Brokerage Insights MVP</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <div class="app-layout">
+        <aside class="app-sidebar">
+          <div class="sidebar-brand">
+            <h1>Brokerage Insights</h1>
+            <p>MVP Workspace</p>
+          </div>
+
+          <nav class="section-tabs" aria-label="App Sections">
+            <button class="section-tab active" data-section="brokerage">
+              <span class="section-tab-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" role="img" focusable="false">
+                  <path
+                    d="M4 5h16M4 12h16M4 19h10M16 17l2 2 4-4"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </span>
+              <span class="section-tab-text">Brokerage Email</span>
+            </button>
+            <button class="section-tab" data-section="notifications">
+              <span class="section-tab-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" role="img" focusable="false">
+                  <path
+                    d="M7 8a5 5 0 1110 0v4l2 3H5l2-3V8zM10 18a2 2 0 004 0"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </span>
+              <span class="section-tab-text">Notifications</span>
+            </button>
+          </nav>
+        </aside>
+
+        <div class="app-main-shell">
+          <header class="app-header">
+            <div class="header-row">
+              <div class="brand">
+                <h2>Workspace</h2>
+                <p>Brokerage intelligence and exchange announcements</p>
+              </div>
+              <div class="header-actions">
+                <button id="google-connect-btn" class="btn">Sign in with Google</button>
+                <button id="signout-btn" class="btn">Sign out</button>
+                <button id="ingest-setup-btn" class="btn">Ingest setup</button>
+                <button id="run-ingest-btn" class="btn">Run ingest now</button>
+                <button id="send-digest-btn" class="btn primary">Send digest preview</button>
+              </div>
+            </div>
+
+            <div class="status-strip">
+              <span id="backend-status">Backend status: checking...</span>
+              <span id="auth-status">Auth status: not signed in</span>
+              <span id="pipeline-status">Pipeline status: using frontend mock data</span>
+            </div>
+
+            <nav id="brokerage-view-tabs" class="view-tabs" aria-label="Brokerage Email Views">
+              <button class="tab active" data-view="dashboard">Dashboard</button>
+              <button class="tab" data-view="archive">Archive</button>
+              <button class="tab" data-view="company">Company View</button>
+              <button class="tab" data-view="settings">Settings</button>
+              <button class="tab" data-view="digest">Digest Preview</button>
+            </nav>
+          </header>
+
+          <main class="app-main">
+            <section id="view-dashboard" class="view active">
+          <div class="filters">
+            <label>
+              Broker
+              <select id="filter-broker"></select>
+            </label>
+            <label>
+              Report Type
+              <select id="filter-type">
+                <option value="All">All</option>
+                <option value="Initiation">Initiation</option>
+                <option value="Results Update">Results Update</option>
+                <option value="General Update">General Update</option>
+                <option value="Sector Update">Sector Update</option>
+              </select>
+            </label>
+            <label>
+              Company Search
+              <input id="filter-search" type="search" placeholder="Reliance, UltraTech, ICICI..." />
+            </label>
+            <label class="inline-check">
+              <input id="filter-duplicates" type="checkbox" />
+              Include duplicate snippets
+            </label>
+          </div>
+
+          <div class="chip-row" id="control-chip-row"></div>
+
+          <div class="kpi-grid" id="kpi-grid"></div>
+
+          <div class="broker-lanes" id="broker-lanes"></div>
+            </section>
+
+            <section id="view-archive" class="view">
+          <article class="panel">
+            <header>Archived Source Emails</header>
+            <div class="panel-body">
+              <div class="archive-toolbar">
+                <label>
+                  Broker
+                  <select id="archive-broker-filter"></select>
+                </label>
+                <label>
+                  Search subject/from
+                  <input id="archive-search" type="search" placeholder="Reliance, Axis, results..." />
+                </label>
+                <button id="archive-refresh-btn" class="btn" type="button">Refresh archive list</button>
+              </div>
+              <div id="archive-summary" class="note"></div>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Broker</th>
+                      <th>From</th>
+                      <th>Subject</th>
+                      <th>Source Links</th>
+                    </tr>
+                  </thead>
+                  <tbody id="archive-table"></tbody>
+                </table>
+              </div>
+              <div class="table-pager">
+                <button id="archive-prev-btn" class="btn" type="button">Previous</button>
+                <span id="archive-page-label" class="page-label">Page 1 of 1</span>
+                <button id="archive-next-btn" class="btn" type="button">Next</button>
+              </div>
+            </div>
+          </article>
+            </section>
+
+            <section id="view-company" class="view">
+          <div class="company-topbar">
+            <label>
+              Company
+              <select id="company-select"></select>
+            </label>
+            <label>
+              Sort
+              <select id="company-sort">
+                <option value="latest">Latest first</option>
+                <option value="broker">Broker name</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="split-layout">
+            <article class="panel">
+              <header>Broker Perspectives (kept separate)</header>
+              <div class="panel-body timeline" id="company-timeline"></div>
+            </article>
+            <aside class="panel">
+              <header>Analyst Workbench</header>
+              <div class="panel-body" id="company-workbench"></div>
+            </aside>
+          </div>
+            </section>
+
+            <section id="view-notifications" class="view">
+          <article class="panel">
+            <header>Exchange Announcements</header>
+            <div class="panel-body">
+              <div class="notifications-toolbar">
+                <label>
+                  Exchange
+                  <select id="notifications-exchange-select">
+                    <option value="NSE" selected>NSE</option>
+                    <option value="BSE">BSE</option>
+                    <option value="NSE+BSE">NSE+BSE (No DeDup)</option>
+                    <option value="DEDUP">Dedup</option>
+                  </select>
+                </label>
+                <label>
+                  Symbol filter
+                  <input id="notifications-symbol-input" type="text" placeholder="Example: TCS" />
+                </label>
+                <label>
+                  AI label filter
+                  <select id="notifications-ai-label-filter">
+                    <option value="all" selected>All</option>
+                  </select>
+                </label>
+                <label>
+                  Rows per page
+                  <select id="notifications-limit-select">
+                    <option value="50" selected>50</option>
+                    <option value="100">100</option>
+                    <option value="200">200</option>
+                    <option value="500">500</option>
+                  </select>
+                </label>
+                <button id="notifications-refresh-btn" class="btn" type="button">Refresh</button>
+              </div>
+              <div id="notifications-review-feedback" class="note"></div>
+              <div id="notifications-meta" class="note"></div>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Time</th>
+                      <th>Exchange</th>
+                      <th>Symbol</th>
+                      <th>Company</th>
+                      <th>Type</th>
+                      <th>AI Label</th>
+                      <th>AI Notes</th>
+                      <th>Correct Label</th>
+                      <th>Save</th>
+                      <th>Attachment</th>
+                    </tr>
+                  </thead>
+                  <tbody id="notifications-table"></tbody>
+                </table>
+              </div>
+              <div class="table-pager">
+                <button id="notifications-prev-btn" class="btn" type="button">Previous</button>
+                <span id="notifications-page-label" class="page-label">Page 1 of 1</span>
+                <button id="notifications-next-btn" class="btn" type="button">Next</button>
+              </div>
+            </div>
+          </article>
+            </section>
+
+            <section id="view-settings" class="view">
+          <div class="split-layout">
+            <article class="panel">
+              <header>Company Normalization Dictionary</header>
+              <div class="panel-body">
+                <form id="dictionary-form" class="inline-form">
+                  <input id="dictionary-canonical" type="text" placeholder="Canonical company name" required />
+                  <input id="dictionary-ticker" type="text" placeholder="Ticker (example: NSE:RIL)" required />
+                  <input id="dictionary-aliases" type="text" placeholder="Aliases comma separated" required />
+                  <button class="btn" type="submit">Add mapping</button>
+                </form>
+
+                <div class="table-wrap">
+                  <table class="data-table">
+                    <thead>
+                      <tr>
+                        <th>Canonical</th>
+                        <th>Ticker</th>
+                        <th>Aliases</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody id="dictionary-table"></tbody>
+                  </table>
+                </div>
+              </div>
+            </article>
+
+            <aside class="panel">
+              <header>Control Lists and Daily Email</header>
+              <div class="panel-body settings-stack">
+                <div>
+                  <h3>Priority Companies</h3>
+                  <form id="priority-form" class="inline-form compact">
+                    <input id="priority-input" type="text" placeholder="Add canonical company" required />
+                    <button class="btn" type="submit">Add</button>
+                  </form>
+                  <div class="chip-row" id="priority-list"></div>
+                </div>
+
+                <div>
+                  <h3>Ignore Companies</h3>
+                  <form id="ignore-form" class="inline-form compact">
+                    <input id="ignore-input" type="text" placeholder="Add canonical company" required />
+                    <button class="btn" type="submit">Add</button>
+                  </form>
+                  <div class="chip-row" id="ignore-list"></div>
+                </div>
+
+                <div>
+                  <h3>Digest Recipients</h3>
+                  <form id="recipient-form" class="inline-form compact">
+                    <input id="recipient-input" type="email" placeholder="email@domain.com" required />
+                    <button class="btn" type="submit">Add</button>
+                  </form>
+                  <div class="chip-row" id="recipient-list"></div>
+                </div>
+
+                <div>
+                  <h3>Digest Schedule</h3>
+                  <div class="inline-form compact">
+                    <input id="schedule-input" type="text" value="Daily 07:30 IST" />
+                    <button id="schedule-save-btn" class="btn" type="button">Save</button>
+                  </div>
+                </div>
+
+                <div class="note good">
+                  Shared archived links let recipients open source emails without Gmail account access.
+                </div>
+              </div>
+            </aside>
+          </div>
+            </section>
+
+            <section id="view-digest" class="view">
+          <article class="panel">
+            <header>Daily Digest Preview</header>
+            <div class="panel-body" id="digest-preview"></div>
+          </article>
+            </section>
+          </main>
+        </div>
+      </div>
+    </div>
+
+    <div id="ingest-setup-modal" class="modal-shell hidden" role="dialog" aria-modal="true" aria-labelledby="ingest-setup-title">
+      <button class="modal-backdrop" data-ingest-close type="button" aria-label="Close ingest setup"></button>
+      <section class="modal-card" aria-live="polite">
+        <header class="modal-header">
+          <div>
+            <h3 id="ingest-setup-title">Ingest Setup</h3>
+            <p>Select Gmail labels to track and set daily ingestion time.</p>
+          </div>
+          <button id="ingest-setup-close-btn" class="btn" type="button">Close</button>
+        </header>
+        <div class="modal-body">
+          <div class="modal-form-grid">
+            <label>
+              Gmail query (optional)
+              <input id="ingest-setup-query" type="text" placeholder="Example: has:attachment newer_than:30d" />
+            </label>
+            <label>
+              Max messages per run
+              <input id="ingest-setup-max-results" type="number" min="1" max="100" value="30" />
+            </label>
+            <label>
+              Daily run time
+              <input id="ingest-setup-time" type="time" value="07:30" />
+            </label>
+            <label>
+              Time zone
+              <input id="ingest-setup-timezone" type="text" value="Asia/Kolkata" />
+            </label>
+          </div>
+
+          <div class="modal-actions-row">
+            <button id="ingest-setup-refresh-labels-btn" class="btn" type="button">Refresh labels</button>
+            <button id="ingest-setup-select-all-btn" class="btn" type="button">Select all labels</button>
+            <button id="ingest-setup-clear-all-btn" class="btn" type="button">Clear labels</button>
+          </div>
+
+          <label class="inline-check">
+            <input id="ingest-setup-start-now" type="checkbox" checked />
+            Start from now (ingest only new emails after save)
+          </label>
+          <label class="inline-check">
+            <input id="ingest-setup-reset-cursor" type="checkbox" />
+            Backfill older emails (reset cursor to oldest)
+          </label>
+
+          <div id="ingest-setup-labels" class="ingest-label-list"></div>
+          <div id="ingest-setup-status" class="note"></div>
+        </div>
+        <footer class="modal-footer">
+          <button id="ingest-setup-cancel-btn" class="btn" type="button">Cancel</button>
+          <button id="ingest-setup-save-btn" class="btn primary" type="button">Save setup</button>
+        </footer>
+      </section>
+    </div>
+
+    <script src="./app.js?v=20260220-1058" type="module"></script>
+  </body>
+</html>

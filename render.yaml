@@ -1,0 +1,41 @@
+services:
+  - type: web
+    name: pkeday-brokerage-insights-api
+    runtime: node
+    rootDir: backend
+    plan: free
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: APP_NAME
+        value: brokerage-insights-mvp-api
+      - key: APP_ENV
+        value: production
+      - key: CORS_ORIGIN
+        value: https://pkeday.github.io
+      - key: FRONTEND_URL
+        value: https://pkeday.github.io/brokerage-insights-mvp/
+      - key: PUBLIC_API_BASE_URL
+        value: https://pkeday-brokerage-insights-api.onrender.com
+      - key: AUTH_SECRET
+        generateValue: true
+      - key: TOKEN_ENCRYPTION_KEY
+        generateValue: true
+      - key: CRON_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: pkeday-ai-webapp-db
+          property: connectionString
+      - key: DATABASE_SSL_MODE
+        value: require
+      - key: DATABASE_MAX_CONNECTIONS
+        value: "5"
+      - key: BROKERAGE_DB_TABLE
+        value: brokerage_insights_mvp_state
+      - key: BROKERAGE_DB_STATE_ID
+        value: primary
