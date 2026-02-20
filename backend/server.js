@@ -12,6 +12,7 @@ import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
+import { createExtractionOrchestrator } from "./services/extraction-orchestration.js";
 
 const port = Number.parseInt(process.env.PORT ?? "10001", 10);
 const appName = process.env.APP_NAME ?? "brokerage-insights-mvp-api";
@@ -118,6 +119,8 @@ const defaultDb = {
   gmailConnections: [],
   gmailPreferences: [],
   emailArchives: [],
+  extractionRuns: [],
+  extractedReports: [],
   notes: [],
   counters: {
     noteId: 1
@@ -143,6 +146,12 @@ let databaseReady = false;
 await initializeDatabase();
 let db = await loadDb();
 let persistQueue = Promise.resolve();
+const extractionOrchestrator = await createExtractionOrchestrator({
+  getDb: () => db,
+  persistDb,
+  newId,
+  log
+});
 
 if (!configuredAuthSecret) {
   log("AUTH_SECRET is not set. A temporary runtime secret is being used.");
@@ -368,6 +377,8 @@ function mergeDbDefaults(value) {
       ? value.gmailPreferences.map((entry) => normalizeGmailPreferencesEntry(entry))
       : [],
     emailArchives: Array.isArray(value.emailArchives) ? value.emailArchives : [],
+    extractionRuns: Array.isArray(value.extractionRuns) ? value.extractionRuns : [],
+    extractedReports: Array.isArray(value.extractedReports) ? value.extractedReports : [],
     notes: Array.isArray(value.notes) ? value.notes : []
   };
 }
@@ -1332,6 +1343,8 @@ function handleStatus(req, res) {
     lastWorkerHeartbeatAt: db.cronState.lastWorkerHeartbeatAt,
     totalUsers: db.users.length,
     totalArchives: db.emailArchives.length,
+    totalExtractionRuns: db.extractionRuns.length,
+    totalExtractedReports: db.extractedReports.length,
     databaseConfigured: Boolean(databaseUrl),
     databaseEnabled: isDatabaseEnabled()
   });
@@ -1865,6 +1878,127 @@ async function handleGmailIngest(req, res, auth) {
   });
 }
 
+function parsePaginationParams(requestUrl, fallbackLimit = 30) {
+  const limitRaw = Number(requestUrl.searchParams.get("limit") ?? String(fallbackLimit));
+  const offsetRaw = Number(requestUrl.searchParams.get("offset") ?? "0");
+  return {
+    limit: Math.max(1, Math.min(100, Number.isFinite(limitRaw) ? Math.floor(limitRaw) : fallbackLimit)),
+    offset: Math.max(0, Number.isFinite(offsetRaw) ? Math.floor(offsetRaw) : 0)
+  };
+}
+
+function parseArchiveIdList(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  return value.map((entry) => String(entry ?? "").trim()).filter(Boolean);
+}
+
+async function handleTriggerExtractionRun(req, res, auth) {
+  const body = await readJsonBody(req);
+  const parsedArchiveIds = parseArchiveIdList(body.archiveIds);
+  if (body.archiveIds !== undefined && body.archiveIds !== null && parsedArchiveIds === null) {
+    sendJson(req, res, 400, { error: "archiveIds must be an array of archive ids." });
+    return;
+  }
+
+  if (parsedArchiveIds && parsedArchiveIds.length > 1000) {
+    sendJson(req, res, 400, { error: "archiveIds cannot exceed 1000 entries per run." });
+    return;
+  }
+
+  const broker = body.broker === undefined || body.broker === null ? null : String(body.broker).trim();
+  if (body.broker !== undefined && body.broker !== null && !broker) {
+    sendJson(req, res, 400, { error: "broker filter cannot be an empty string." });
+    return;
+  }
+
+  const limitInput = body.limit;
+  if (
+    limitInput !== undefined &&
+    (!Number.isFinite(Number(limitInput)) || Number(limitInput) < 1 || Number(limitInput) > 1000)
+  ) {
+    sendJson(req, res, 400, { error: "limit must be a number between 1 and 1000." });
+    return;
+  }
+
+  const run = await extractionOrchestrator.triggerRun({
+    userId: auth.user.id,
+    archiveIds: parsedArchiveIds,
+    broker,
+    limit: limitInput,
+    includeAlreadyExtracted: body.includeAlreadyExtracted === true,
+    trigger: typeof body.trigger === "string" ? body.trigger : "manual_api"
+  });
+
+  sendJson(req, res, 202, {
+    ok: true,
+    run
+  });
+}
+
+async function handleListExtractionRuns(req, res, auth, requestUrl) {
+  const { limit, offset } = parsePaginationParams(requestUrl, 20);
+  const status = requestUrl.searchParams.get("status")?.trim().toLowerCase() || null;
+  if (status && !["queued", "running", "completed", "failed"].includes(status)) {
+    sendJson(req, res, 400, {
+      error: "status must be one of: queued, running, completed, failed."
+    });
+    return;
+  }
+
+  const payload = extractionOrchestrator.listRuns({
+    userId: auth.user.id,
+    limit,
+    offset,
+    status
+  });
+  sendJson(req, res, 200, payload);
+}
+
+async function handleGetExtractionRunStatus(req, res, auth, runId) {
+  const run = extractionOrchestrator.getRunStatus({
+    userId: auth.user.id,
+    runId
+  });
+
+  if (!run) {
+    sendJson(req, res, 404, { error: "Extraction run not found." });
+    return;
+  }
+
+  sendJson(req, res, 200, { run });
+}
+
+async function handleListExtractedReports(req, res, auth, requestUrl) {
+  const { limit, offset } = parsePaginationParams(requestUrl, 30);
+  const includeDuplicatesRaw = requestUrl.searchParams.get("includeDuplicates");
+  const includeDuplicates =
+    includeDuplicatesRaw === null
+      ? true
+      : !(includeDuplicatesRaw.toLowerCase() === "false" || includeDuplicatesRaw === "0");
+
+  const payload = extractionOrchestrator.listReports({
+    userId: auth.user.id,
+    limit,
+    offset,
+    broker: requestUrl.searchParams.get("broker"),
+    reportType: requestUrl.searchParams.get("reportType"),
+    company: requestUrl.searchParams.get("company"),
+    runId: requestUrl.searchParams.get("runId"),
+    query: requestUrl.searchParams.get("q"),
+    publishedFrom: requestUrl.searchParams.get("publishedFrom"),
+    publishedTo: requestUrl.searchParams.get("publishedTo"),
+    includeDuplicates
+  });
+
+  sendJson(req, res, 200, payload);
+}
+
 async function handleListEmailArchives(req, res, auth, requestUrl) {
   const limitRaw = Number(requestUrl.searchParams.get("limit") ?? "30");
   const offsetRaw = Number(requestUrl.searchParams.get("offset") ?? "0");
@@ -2093,7 +2227,11 @@ const server = createServer(async (req, res) => {
           "GET /api/gmail/labels",
           "GET/PUT /api/gmail/preferences",
           "POST /api/gmail/ingest",
-          "GET /api/email-archives"
+          "GET /api/email-archives",
+          "POST /api/extraction/runs",
+          "GET /api/extraction/runs",
+          "GET /api/extraction/runs/:runId/status",
+          "GET /api/extracted-reports"
         ]
       });
       return;
@@ -2210,6 +2348,53 @@ const server = createServer(async (req, res) => {
       }
       if (method === "POST") {
         await handleGmailIngest(req, res, auth);
+        return;
+      }
+    }
+
+    if (pathName === "/api/extraction/runs") {
+      const auth = requireAuth(req, res);
+      if (!auth) {
+        return;
+      }
+
+      if (method === "POST") {
+        await handleTriggerExtractionRun(req, res, auth);
+        return;
+      }
+
+      if (method === "GET") {
+        await handleListExtractionRuns(req, res, auth, requestUrl);
+        return;
+      }
+    }
+
+    if (
+      segments.length === 5 &&
+      segments[0] === "api" &&
+      segments[1] === "extraction" &&
+      segments[2] === "runs" &&
+      segments[4] === "status"
+    ) {
+      const auth = requireAuth(req, res);
+      if (!auth) {
+        return;
+      }
+
+      if (method === "GET") {
+        await handleGetExtractionRunStatus(req, res, auth, segments[3]);
+        return;
+      }
+    }
+
+    if (pathName === "/api/extracted-reports") {
+      const auth = requireAuth(req, res);
+      if (!auth) {
+        return;
+      }
+
+      if (method === "GET") {
+        await handleListExtractedReports(req, res, auth, requestUrl);
         return;
       }
     }
