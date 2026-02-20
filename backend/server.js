@@ -1603,12 +1603,29 @@ async function handlePutGmailPreferences(req, res, auth) {
   const scheduleHour = Number.parseInt(String(body.scheduleHour ?? prefs.scheduleHour), 10);
   const scheduleMinute = Number.parseInt(String(body.scheduleMinute ?? prefs.scheduleMinute), 10);
   const scheduleTimezone = resolveTimeZone(body.scheduleTimezone ?? prefs.scheduleTimezone);
-  const ingestFromDate = normalizeDateOnly(body.ingestFromDate ?? prefs.ingestFromDate);
-  const ingestToDate = normalizeDateOnly(body.ingestToDate ?? prefs.ingestToDate);
+  const hasIngestFromDate = Object.prototype.hasOwnProperty.call(body, "ingestFromDate");
+  const hasIngestToDate = Object.prototype.hasOwnProperty.call(body, "ingestToDate");
+  const rawIngestFromDate = hasIngestFromDate ? body.ingestFromDate : prefs.ingestFromDate;
+  const rawIngestToDate = hasIngestToDate ? body.ingestToDate : prefs.ingestToDate;
+  const ingestFromDate =
+    rawIngestFromDate === null || String(rawIngestFromDate).trim() === ""
+      ? null
+      : normalizeDateOnly(rawIngestFromDate);
+  const ingestToDate =
+    rawIngestToDate === null || String(rawIngestToDate).trim() === ""
+      ? null
+      : normalizeDateOnly(rawIngestToDate);
   const resetCursorToNow = body.startFromNow === true;
   const resetCursorToStart = body.resetCursor === true;
 
   const brokerMappings = Array.isArray(body.brokerMappings) ? body.brokerMappings : prefs.brokerMappings;
+  if (
+    (hasIngestFromDate && rawIngestFromDate !== null && String(rawIngestFromDate).trim() !== "" && !ingestFromDate) ||
+    (hasIngestToDate && rawIngestToDate !== null && String(rawIngestToDate).trim() !== "" && !ingestToDate)
+  ) {
+    sendJson(req, res, 400, { error: "Invalid ingest date format. Use YYYY-MM-DD." });
+    return;
+  }
   if (ingestFromDate && ingestToDate && ingestFromDate > ingestToDate) {
     sendJson(req, res, 400, { error: "Ingest start date cannot be after end date." });
     return;
