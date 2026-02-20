@@ -473,12 +473,16 @@ function bindEvents() {
     if (refs.ingestSetupStartNow.checked && refs.ingestSetupResetCursor.checked) {
       refs.ingestSetupResetCursor.checked = false;
     }
+    state.ingestSetup.startFromNow = refs.ingestSetupStartNow.checked;
+    state.ingestSetup.resetCursor = refs.ingestSetupResetCursor.checked;
   });
 
   refs.ingestSetupResetCursor.addEventListener("change", () => {
     if (refs.ingestSetupResetCursor.checked && refs.ingestSetupStartNow.checked) {
       refs.ingestSetupStartNow.checked = false;
     }
+    state.ingestSetup.startFromNow = refs.ingestSetupStartNow.checked;
+    state.ingestSetup.resetCursor = refs.ingestSetupResetCursor.checked;
   });
 
   refs.runIngestBtn.addEventListener("click", async () => {
@@ -1629,8 +1633,6 @@ async function loadIngestSetupData(fetchLabels = true) {
   state.ingestSetup.scheduleTimezone = String(
     prefs.scheduleTimezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Kolkata"
   );
-  state.ingestSetup.startFromNow = false;
-  state.ingestSetup.resetCursor = false;
   state.ingestSetup.statusMessage = `Loaded ${labels.length} labels. ${trackedIds.length} currently tracked.`;
 }
 
@@ -1730,6 +1732,10 @@ async function saveIngestSetup() {
     .filter((label) => selectedLabelIds.includes(label.id))
     .map((label) => label.name);
   const scheduleTime = parseScheduleTime(refs.ingestSetupTime.value);
+  const startFromNow = refs.ingestSetupStartNow.checked;
+  const resetCursor = refs.ingestSetupResetCursor.checked;
+  state.ingestSetup.startFromNow = startFromNow;
+  state.ingestSetup.resetCursor = resetCursor;
 
   state.ingestSetup.saving = true;
   state.ingestSetup.statusMessage = "Saving ingest setup...";
@@ -1747,14 +1753,12 @@ async function saveIngestSetup() {
         scheduleHour: scheduleTime.hour,
         scheduleMinute: scheduleTime.minute,
         scheduleTimezone: refs.ingestSetupTimezone.value.trim() || "Asia/Kolkata",
-        startFromNow: refs.ingestSetupStartNow.checked,
-        resetCursor: refs.ingestSetupResetCursor.checked
+        startFromNow,
+        resetCursor
       })
     });
 
     state.ingestSetup.statusMessage = "Ingest setup saved.";
-    state.ingestSetup.startFromNow = false;
-    state.ingestSetup.resetCursor = false;
     setPipelineMessage(
       `Tracking ${selectedLabelIds.length} labels. Daily ingest at ${formatScheduleTime(
         scheduleTime.hour,
