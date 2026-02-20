@@ -159,6 +159,10 @@ export async function updateExtractionRun(pool, runId, updates = {}) {
     }
   }
 
+  if (Object.hasOwn(updates, "meta") && Object.hasOwn(updates, "metaPatch")) {
+    throw new TypeError("Use either meta or metaPatch in one update call, not both");
+  }
+
   const values = [];
   const setClauses = [];
 
