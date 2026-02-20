@@ -505,6 +505,74 @@ input[type="checkbox"] {
   gap: 10px;
 }
 
+.extraction-workspace {
+  margin-top: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.extraction-toolbar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.extraction-filters {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(220px, 1.3fr) minmax(160px, 1fr) auto;
+  gap: 8px;
+  margin-bottom: 8px;
+  align-items: end;
+}
+
+.extraction-filters label {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 11px;
+  color: #4c655e;
+  background: #fff;
+}
+
+.extraction-filters label input,
+.extraction-filters label select {
+  margin-top: 4px;
+}
+
+.tag.extraction-status {
+  font-weight: 700;
+}
+
+.tag.extraction-status-running,
+.tag.extraction-status-in-progress {
+  background: #edf4ff;
+  border-color: #a7bfdc;
+  color: #274a76;
+}
+
+.tag.extraction-status-success,
+.tag.extraction-status-completed,
+.tag.extraction-status-ok {
+  background: #e8f5ef;
+  border-color: #86b8a1;
+  color: #1b4d3a;
+}
+
+.tag.extraction-status-failed,
+.tag.extraction-status-error {
+  background: #fff0ee;
+  border-color: #deb4ad;
+  color: #7a352b;
+}
+
+#extracted-reports-table td:nth-child(6) {
+  min-width: 320px;
+  max-width: 520px;
+  white-space: normal;
+  word-break: break-word;
+}
+
 .lane {
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -991,6 +1059,10 @@ input[type="checkbox"] {
     grid-template-columns: repeat(2, minmax(140px, 1fr));
   }
 
+  .extraction-filters {
+    grid-template-columns: repeat(2, minmax(160px, 1fr));
+  }
+
   .inline-form {
     grid-template-columns: 1fr;
   }
@@ -1076,6 +1148,10 @@ input[type="checkbox"] {
   }
 
   .notifications-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .extraction-filters {
     grid-template-columns: 1fr;
   }
 
