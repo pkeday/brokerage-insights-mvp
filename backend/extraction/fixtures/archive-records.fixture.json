@@ -1,0 +1,74 @@
+[
+  {
+    "id": "arc_001",
+    "userId": "user_001",
+    "broker": "Axis Capital",
+    "from": "\"Axis Capital Research\" <research@axiscap.com>",
+    "subject": "ABC Industries Ltd: Initiating Coverage with BUY",
+    "snippet": "Initiating coverage on ABC Industries Ltd with BUY and target price Rs 980.",
+    "bodyPreview": "Axis Capital initiates coverage on ABC Industries Ltd with a BUY rating and target price of Rs 980. We expect strong earnings growth over FY25-27.",
+    "dateHeader": "Tue, 04 Feb 2025 07:10:00 +0530",
+    "internalDateMs": 1738633200000,
+    "ingestedAt": "2025-02-04T03:00:00.000Z"
+  },
+  {
+    "id": "arc_002",
+    "userId": "user_001",
+    "broker": "Axis Capital",
+    "from": "\"Axis Capital Research\" <research@axiscap.com>",
+    "subject": "ABC Industries Ltd Q3FY25 Results Update",
+    "snippet": "Q3FY25 results update on ABC Industries Ltd.",
+    "bodyPreview": "ABC Industries Ltd reported strong Q3FY25 earnings with EBITDA margin expansion. We retain BUY and raise EPS estimates for FY26.",
+    "dateHeader": "Wed, 05 Feb 2025 06:00:00 +0530",
+    "internalDateMs": 1738715400000,
+    "ingestedAt": "2025-02-05T01:00:00.000Z"
+  },
+  {
+    "id": "arc_003",
+    "userId": "user_001",
+    "broker": "Axis Capital",
+    "from": "\"Axis Capital Research\" <research@axiscap.com>",
+    "subject": "ABC Industries Ltd - Initiating coverage with BUY",
+    "snippet": "Initiating coverage on ABC Industries Ltd with BUY and target price Rs 980.",
+    "bodyPreview": "We are initiating coverage on ABC Industries Ltd with a BUY rating and target price of Rs 980.",
+    "dateHeader": "Tue, 04 Feb 2025 08:20:00 +0530",
+    "internalDateMs": 1738637400000,
+    "ingestedAt": "2025-02-04T03:40:00.000Z"
+  },
+  {
+    "id": "arc_004",
+    "userId": "user_001",
+    "broker": "Kotak Institutional Equities",
+    "from": "\"Kotak IE\" <research@kotak.com>",
+    "subject": "ABC Industries Ltd: Initiating Coverage with BUY",
+    "snippet": "Initiating coverage on ABC Industries Ltd with BUY and target price Rs 980.",
+    "bodyPreview": "Kotak initiates coverage on ABC Industries Ltd with BUY and target price of Rs 980.",
+    "dateHeader": "Tue, 04 Feb 2025 07:25:00 +0530",
+    "internalDateMs": 1738634100000,
+    "ingestedAt": "2025-02-04T03:10:00.000Z"
+  },
+  {
+    "id": "arc_005",
+    "userId": "user_001",
+    "broker": "Jefferies India",
+    "from": "\"Jefferies India\" <research@jefferies.com>",
+    "subject": "General Update: Domestic Chemicals",
+    "snippet": "General market update for domestic chemicals universe.",
+    "bodyPreview": "We share a broad update on domestic chemicals and monitor demand recovery trends in export-linked names.",
+    "dateHeader": "Thu, 06 Feb 2025 09:15:00 +0530",
+    "internalDateMs": 1738813500000,
+    "ingestedAt": "2025-02-06T04:00:00.000Z"
+  },
+  {
+    "id": "arc_006",
+    "userId": "user_001",
+    "broker": "Emkay Global",
+    "from": "\"Emkay Global\" <research@emkayglobal.com>",
+    "subject": "XYZ Tech Ltd upgraded to BUY; target price raised",
+    "snippet": "Upgrade to BUY with target price revision.",
+    "bodyPreview": "We upgrade XYZ Tech Ltd to BUY and raise target price after strong deal wins.",
+    "dateHeader": "Fri, 07 Feb 2025 10:20:00 +0530",
+    "internalDateMs": 1738903800000,
+    "ingestedAt": "2025-02-07T05:00:00.000Z"
+  }
+]
