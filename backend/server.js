@@ -1584,10 +1584,17 @@ async function runGmailIngestForUser(params) {
   );
 
   const explicitQuery = typeof params.query === "string" && params.query.trim() ? params.query.trim() : params.prefs.query;
-  const startAfterEpoch =
-    Number.isFinite(Number(params.afterEpoch)) && Number(params.afterEpoch) > 0
-      ? Number(params.afterEpoch)
-      : Number(params.prefs.lastIngestAfterEpoch ?? 0);
+  const hasExplicitAfterEpoch =
+    Object.prototype.hasOwnProperty.call(params, "afterEpoch") &&
+    params.afterEpoch !== undefined &&
+    params.afterEpoch !== null &&
+    String(params.afterEpoch).trim() !== "";
+  const parsedAfterEpoch = hasExplicitAfterEpoch ? Number(params.afterEpoch) : NaN;
+  const startAfterEpoch = hasExplicitAfterEpoch
+    ? Number.isFinite(parsedAfterEpoch)
+      ? Math.max(0, Math.floor(parsedAfterEpoch))
+      : Math.max(0, Number(params.prefs.lastIngestAfterEpoch ?? 0))
+    : Math.max(0, Number(params.prefs.lastIngestAfterEpoch ?? 0));
   const query = composeIngestQuery(explicitQuery, startAfterEpoch);
   const accessToken = await getValidGoogleAccessToken(params.connection);
 
@@ -1639,7 +1646,8 @@ async function runGmailIngestForUser(params) {
   }
 
   const skippedOnlyUnmapped = messages.length > 0 && archivedCount === 0 && skippedUnmappedCount === messages.length;
-  if (!skippedOnlyUnmapped) {
+  const cursorAdvanced = !skippedOnlyUnmapped && messages.length > 0;
+  if (cursorAdvanced) {
     params.prefs.lastIngestAfterEpoch = Math.max(startAfterEpoch, newestInternalEpoch, nowEpoch);
   }
   params.prefs.lastIngestAt = new Date().toISOString();
@@ -1653,7 +1661,7 @@ async function runGmailIngestForUser(params) {
       archivedCount,
       skippedCount,
       skippedUnmappedCount,
-      cursorAdvanced: !skippedOnlyUnmapped,
+      cursorAdvanced,
       attachmentCount,
       trackedLabels: labelIds,
       cursorAfterEpoch: params.prefs.lastIngestAfterEpoch
