@@ -1529,6 +1529,8 @@ async function handleAuthMe(req, res, auth) {
       scheduleHour: prefs.scheduleHour,
       scheduleMinute: prefs.scheduleMinute,
       scheduleTimezone: prefs.scheduleTimezone,
+      ingestFromDate: prefs.ingestFromDate,
+      ingestToDate: prefs.ingestToDate,
       lastIngestAfterEpoch: prefs.lastIngestAfterEpoch,
       lastIngestAt: prefs.lastIngestAt,
       lastScheduledRunDate: prefs.lastScheduledRunDate
