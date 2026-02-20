@@ -1,5 +1,12 @@
 services:
   - type: web
+    name: pkeday-brokerage-insights-frontend
+    runtime: static
+    buildCommand: rm -rf public && mkdir public && cp -R index.html app.js style.css public/
+    staticPublishPath: public
+    autoDeploy: true
+
+  - type: web
     name: pkeday-brokerage-insights-api
     runtime: node
     rootDir: backend
@@ -16,9 +23,11 @@ services:
       - key: APP_ENV
         value: production
       - key: CORS_ORIGIN
-        value: https://pkeday.github.io
+        value: https://pkeday-brokerage-insights-frontend.onrender.com,http://localhost:5173,http://127.0.0.1:5173
       - key: FRONTEND_URL
-        value: https://pkeday.github.io/brokerage-insights-mvp/
+        value: https://pkeday-brokerage-insights-frontend.onrender.com
+      - key: AUTH_ALLOWED_REDIRECTS
+        value: https://pkeday-brokerage-insights-frontend.onrender.com,https://pkeday-brokerage-insights-frontend.onrender.com/,http://localhost:5173,http://127.0.0.1:5173
       - key: PUBLIC_API_BASE_URL
         value: https://pkeday-brokerage-insights-api.onrender.com
       - key: AUTH_SECRET
