@@ -2612,7 +2612,7 @@ async function handleGmailIngest(req, res, auth) {
   for (const item of ingest.items) {
     archivedForPipelineCandidates.push(item);
   }
-  if (archivedForPipelineCandidates.length === 0 && Number(ingest.summary.alreadyArchivedCount || 0) > 0) {
+  if (Number(ingest.summary.alreadyArchivedCount || 0) > 0) {
     const reprocessArchived = body.reprocessArchived !== false;
     if (reprocessArchived) {
       const trackedBrokers = new Set(
@@ -2623,6 +2623,9 @@ async function handleGmailIngest(req, res, auth) {
       const fallbackLimitRaw = Number.parseInt(String(body.reprocessArchivedLimit ?? "25"), 10);
       const fallbackLimit = Number.isFinite(fallbackLimitRaw) ? Math.max(1, Math.min(100, fallbackLimitRaw)) : 25;
       const reprocessCompleted = body.reprocessCompleted === true;
+      const queuedMessageIds = new Set(
+        archivedForPipelineCandidates.map((entry) => normalizeText(entry.gmailMessageId)).filter(Boolean)
+      );
 
       const archivedCandidates = db.emailArchives
         .filter((entry) => entry.userId === auth.user.id)
@@ -2643,7 +2646,14 @@ async function handleGmailIngest(req, res, auth) {
           return true;
         })
         .sort((left, right) => Number(right.internalDateMs ?? 0) - Number(left.internalDateMs ?? 0))
-        .map((entry) => toPipelineArchiveItem(entry));
+        .map((entry) => toPipelineArchiveItem(entry))
+        .filter((entry) => {
+          const messageId = normalizeText(entry.gmailMessageId);
+          if (!messageId) {
+            return false;
+          }
+          return !queuedMessageIds.has(messageId);
+        });
 
       const needsPipeline = await filterRecordsNeedingCompanyPipeline(auth.user.id, archivedCandidates, {
         limit: fallbackLimit,
