@@ -697,6 +697,18 @@ input[type="checkbox"] {
   color: #223631;
 }
 
+.report-insights {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  color: #2b4a40;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.report-insights li + li {
+  margin-top: 2px;
+}
+
 .card-actions {
   display: flex;
   flex-wrap: wrap;
@@ -836,6 +848,23 @@ input[type="checkbox"] {
   text-transform: uppercase;
   letter-spacing: 0.2px;
   background: #fbfdfc;
+}
+
+.extracted-summary {
+  margin: 0;
+  color: #1f322d;
+  line-height: 1.35;
+}
+
+.extracted-insights {
+  margin: 5px 0 0;
+  padding-left: 14px;
+  color: #36594e;
+  line-height: 1.3;
+}
+
+.extracted-insights li + li {
+  margin-top: 2px;
 }
 
 #view-notifications .data-table td:nth-child(7) {

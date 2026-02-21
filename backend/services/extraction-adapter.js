@@ -33,7 +33,7 @@ function normalizeSummary(value, fallback) {
   if (!source) {
     return "No summary available.";
   }
-  return source.slice(0, 3000);
+  return source.slice(0, 420);
 }
 
 function sanitizeKeyPoints(value, fallbackSummary) {
@@ -113,7 +113,7 @@ function guessCompanyFromSubject(subject) {
 
 function createFallbackExtractionResult({ archive, userId }) {
   const companyRaw = guessCompanyFromSubject(archive.subject);
-  const summary = normalizeSummary(archive.bodyPreview, archive.snippet);
+  const summary = normalizeSummary(archive.snippet, archive.bodyPreview);
   return {
     archiveId: archive.id,
     userId,

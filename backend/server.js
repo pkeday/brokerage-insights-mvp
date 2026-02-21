@@ -1189,7 +1189,7 @@ function makeArchivePublicRecord(record) {
   return {
     id: record.id,
     broker: record.broker,
-    from: redactPiiText(record.from, redactionOptions),
+    from: record.broker || redactPiiText(record.from, redactionOptions),
     subject: redactPiiText(record.subject, redactionOptions),
     snippet: redactPiiText(record.snippet, redactionOptions),
     bodyPreview: redactPiiText(record.bodyPreview, redactionOptions),

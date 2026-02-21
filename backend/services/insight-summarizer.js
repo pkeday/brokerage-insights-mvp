@@ -2,7 +2,13 @@ import { normalizeWhitespace, splitSentences, truncateText, uniqueStrings } from
 import { redactPiiText } from "../extraction/pii-redaction.js";
 
 const NUMERIC_SIGNAL_PATTERN = /\b(?:\d+(?:\.\d+)?%|(?:rs\.?|inr)\s?\d[\d,.]*|usd\s?\d[\d,.]*|\d[\d,.]*\s?(?:bps|bp|mn|bn|cr|crore|lakh|x))\b/i;
-const NEGATIVE_BOILERPLATE_PATTERN = /\b(?:unsubscribe|confidential|disclaimer|intended recipient|do not reply)\b/i;
+const NEGATIVE_BOILERPLATE_PATTERN =
+  /\b(?:unsubscribe|confidential|disclaimer|intended recipient|do not reply|forwarded message|view in browser|privacy policy)\b/i;
+const INLINE_HEADER_SEGMENT_PATTERN =
+  /\b(?:from|to|cc|bcc|sent|subject|reply-to)\s*:[\s\S]{0,180}?(?=(?:\b(?:from|to|cc|bcc|sent|subject|reply-to)\s*:)|$)/gi;
+const URL_PATTERN = /\b(?:https?:\/\/|www\.)\S+\b/gi;
+const LONG_MACHINE_TOKEN_PATTERN = /\b[a-z0-9_-]{24,}\b/gi;
+const QUOTED_PRINTABLE_PATTERN = /=[0-9A-F]{2}/gi;
 const MAX_SOURCE_TEXT = 2200;
 
 const REPORT_TYPE_KEYWORDS = {
@@ -16,6 +22,40 @@ const REPORT_TYPE_KEYWORDS = {
 
 function hasNumericSignal(sentence) {
   return NUMERIC_SIGNAL_PATTERN.test(sentence);
+}
+
+function sanitizeSourceText(value) {
+  const normalized = normalizeWhitespace(value);
+  if (!normalized) {
+    return "";
+  }
+
+  return normalizeWhitespace(
+    normalized
+      .replace(INLINE_HEADER_SEGMENT_PATTERN, " ")
+      .replace(URL_PATTERN, " ")
+      .replace(QUOTED_PRINTABLE_PATTERN, " ")
+      .replace(LONG_MACHINE_TOKEN_PATTERN, " ")
+      .replace(/\s*[|•]\s*/g, ". ")
+  );
+}
+
+function splitCandidateSentences(value) {
+  const primary = splitSentences(value).map((entry) => normalizeWhitespace(entry)).filter(Boolean);
+  if (primary.length > 1) {
+    return primary;
+  }
+
+  const fallback = normalizeWhitespace(value)
+    .split(/\s*[;|•]\s*|\s*,\s+/)
+    .map((entry) => normalizeWhitespace(entry))
+    .filter((entry) => entry.length >= 20);
+
+  if (fallback.length > 0) {
+    return fallback;
+  }
+
+  return primary;
 }
 
 function scoreSentence(sentence, reportType, title) {
@@ -42,6 +82,10 @@ function scoreSentence(sentence, reportType, title) {
 
   if (normalizedTitle && normalizedSentence.includes(normalizedTitle.slice(0, 20))) {
     score += 1;
+  }
+
+  if (/(?:id=|href=|src=|http|www\.|[a-z0-9_-]{20,})/i.test(sentence)) {
+    score -= 3;
   }
 
   if (sentence.length >= 45 && sentence.length <= 220) {
@@ -110,12 +154,11 @@ function parseSummaryJson(rawText) {
 function buildHeuristicSummary(report, archive) {
   const title = normalizeWhitespace(report.title);
   const reportType = normalizeWhitespace(report.reportType).toLowerCase() || "general_update";
-  const sourceText = normalizeWhitespace(
+  const sourceText = sanitizeSourceText(
     [archive?.bodyPreview, archive?.snippet, report?.summary, title].filter(Boolean).join(" ")
   ).slice(0, MAX_SOURCE_TEXT);
 
-  const candidates = splitSentences(sourceText)
-    .map((sentence) => normalizeWhitespace(sentence))
+  const candidates = splitCandidateSentences(sourceText)
     .filter(Boolean)
     .map((sentence) => ({
       sentence,
@@ -123,13 +166,15 @@ function buildHeuristicSummary(report, archive) {
     }))
     .sort((left, right) => right.score - left.score);
 
+  const rankedFallback = candidates.filter((entry) => entry.score > -4).map((entry) => entry.sentence);
   const topSentences = uniqueStrings(
-    candidates.filter((entry) => entry.score >= 1).map((entry) => entry.sentence),
+    (candidates.filter((entry) => entry.score >= 1).map((entry) => entry.sentence) || []).concat(rankedFallback),
     3
   );
 
+  const fallbackSummary = normalizeWhitespace(report.summary) || normalizeWhitespace(report.title) || "No summary available.";
   const summary = truncateText(
-    topSentences.slice(0, 2).join(" ") || normalizeWhitespace(report.summary) || normalizeWhitespace(sourceText),
+    topSentences.slice(0, 2).join(" ") || fallbackSummary,
     420
   );
 
@@ -149,7 +194,7 @@ async function generateOpenAiSummary(report, archive, config) {
     return null;
   }
 
-  const sourceText = normalizeWhitespace(
+  const sourceText = sanitizeSourceText(
     [archive?.subject, archive?.bodyPreview, archive?.snippet, report?.summary].filter(Boolean).join(" ")
   ).slice(0, MAX_SOURCE_TEXT);
   if (!sourceText) {

@@ -1297,7 +1297,14 @@ function renderExtractionWorkspace() {
         : report.duplicateKey
           ? report.duplicateKey.slice(0, 16)
           : "primary";
-      const summaryWithPoints = [report.summary, ...report.keyPoints.slice(0, 2)].filter(Boolean).join(" | ");
+      const insights = report.keyPoints
+        .slice(0, 2)
+        .map((point) => `<li>${escapeHtml(point)}</li>`)
+        .join("");
+      const summaryCell = `
+        <div class="extracted-summary">${escapeHtml(report.summary)}</div>
+        ${insights ? `<ul class="extracted-insights">${insights}</ul>` : ""}
+      `;
 
       return `
         <tr>
@@ -1310,7 +1317,7 @@ function renderExtractionWorkspace() {
             <div class="dedupe-hint">${escapeHtml(dedupeDetail)}</div>
           </td>
           <td>${escapeHtml(report.title)}</td>
-          <td>${escapeHtml(summaryWithPoints)}</td>
+          <td>${summaryCell}</td>
           <td>${escapeHtml(confidenceText)}</td>
           <td>${sourceLink}</td>
         </tr>
@@ -1422,6 +1429,11 @@ function extractionStatusClass(value) {
 
 function renderReportCard(report) {
   const duplicateTag = report.duplicateOf ? `<span class="tag duplicate">Duplicate snippet</span>` : "";
+  const insights = Array.isArray(report.insights) ? report.insights.slice(0, 3) : [];
+  const insightsHtml =
+    insights.length > 0
+      ? `<ul class="report-insights">${insights.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`
+      : "";
 
   return `
     <article class="report-card">
@@ -1433,6 +1445,7 @@ function renderReportCard(report) {
         ${duplicateTag}
       </div>
       <p class="summary">${escapeHtml(report.summary)}</p>
+      ${insightsHtml}
       <div class="card-actions">
         <a class="link-btn" href="${escapeAttribute(report.links.archive)}" target="_blank" rel="noopener">Open archived .eml</a>
         <a class="link-btn" href="${escapeAttribute(report.links.pdf)}" target="_blank" rel="noopener">Open attachment PDF</a>
@@ -2092,6 +2105,43 @@ function buildReports() {
     }
   }
 
+  if (state.extraction.reports.length > 0) {
+    const archiveById = new Map(state.archives.items.map((entry) => [entry.id, entry]));
+    return state.extraction.reports.map((report) => {
+      const archive = archiveById.get(report.archiveId) || null;
+      const reportTypeLabel = String(report.reportType || "general_update")
+        .replace(/[_-]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/\b\w/g, (value) => value.toUpperCase());
+      const summary = String(report.summary || "").trim() || report.keyPoints[0] || "(No summary)";
+
+      return normalizeReport(
+        {
+          id: `extracted-${report.archiveId || report.title}-${report.publishedAt || ""}`,
+          broker: report.broker || "Unmapped Broker",
+          company: report.companyCanonical || report.companyRaw || "Unknown Company",
+          type: reportTypeLabel || "General Update",
+          coverage: report.duplicateOfReportId ? "Extracted Duplicate" : "Extracted Canonical",
+          time: report.publishedAt || new Date().toISOString(),
+          summary,
+          insights: report.keyPoints.slice(0, 3),
+          sentiment: "neutral",
+          duplicateOf: report.duplicateOfReportId || null,
+          links: {
+            archive: report.archiveId ? toApiAbsolute(`/api/email-archives/${report.archiveId}/raw`) : "#",
+            pdf:
+              archive?.attachments?.[0]?.downloadUrl
+                ? toApiAbsolute(archive.attachments[0].downloadUrl)
+                : "#",
+            gmail: archive?.gmailMessageUrl || "#"
+          }
+        },
+        dictionaryMap
+      );
+    });
+  }
+
   const normalizedSeed = seedReports.map((report) => normalizeReport(report, dictionaryMap));
   const normalizedArchive = state.archives.items.map((archive) => {
     const companyGuess = guessCompanyFromSubject(archive.subject);
@@ -2106,6 +2156,7 @@ function buildReports() {
         coverage: "Email Archive",
         time: archive.dateHeader || archive.ingestedAt,
         summary: archive.bodyPreview || archive.snippet || "(No preview)",
+        insights: [],
         sentiment: "neutral",
         links: {
           archive: toApiAbsolute(archive.downloadUrl),
@@ -2976,9 +3027,9 @@ function normalizeExtractedReport(entry) {
   const companyRaw = String(pickFirstValue(entry, ["companyRaw", "company_raw", "companyOriginal", "company_original"], "")).trim();
   const keyPointsValue = pickFirstValue(entry, ["keyPoints", "key_points", "points"], []);
   const keyPoints = Array.isArray(keyPointsValue)
-    ? keyPointsValue.map((value) => String(value).trim()).filter(Boolean)
+    ? keyPointsValue.map((value) => truncateDisplayText(String(value).trim(), 180)).filter(Boolean)
     : [];
-  const summary = String(pickFirstValue(entry, ["summary", "snippet", "abstract"], "")).trim();
+  const summary = truncateDisplayText(String(pickFirstValue(entry, ["summary", "snippet", "abstract"], "")).trim(), 420);
   const publishedAt = normalizeDateTimeValue(
     pickFirstValue(
       entry,
@@ -3008,6 +3059,22 @@ function normalizeExtractedReport(entry) {
     sourceUrl: /^https?:\/\//i.test(sourceUrlRaw) ? sourceUrlRaw : "",
     publishedAtEpoch: parseDateValue(publishedAt)?.getTime() || 0
   };
+}
+
+function truncateDisplayText(value, maxLength = 420) {
+  const text = String(value ?? "").trim();
+  if (!text || text.length <= maxLength) {
+    return text;
+  }
+
+  const limit = Math.max(1, maxLength - 3);
+  const truncated = text.slice(0, limit);
+  const breakAt = truncated.lastIndexOf(" ");
+  if (breakAt > Math.floor(limit * 0.6)) {
+    return `${truncated.slice(0, breakAt)}...`;
+  }
+
+  return `${truncated}...`;
 }
 
 function pickFirstValue(entry, keys, fallback = "") {

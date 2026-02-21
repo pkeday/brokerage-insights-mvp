@@ -1,11 +1,18 @@
 import { normalizeWhitespace, truncateText } from "../normalization/text.js";
 
 const EMAIL_PATTERN = /\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b/gi;
+const EMAIL_CAPTURE_PATTERN = /\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b/i;
 const PHONE_PATTERN = /(?<!\w)(?:\+?\d[\d()\s.-]{7,}\d)(?!\w)/g;
-const HEADER_LINE_PATTERN = /(?:^|\n)\s*(?:from|to|cc|bcc|sent|subject)\s*:[^\n]*/gi;
+const HEADER_LINE_PATTERN = /(?:^|\n)\s*(?:from|to|cc|bcc|sent|subject|reply-to)\s*:[^\n]*/gi;
+const INLINE_HEADER_SEGMENT_PATTERN =
+  /\b(?:from|to|cc|bcc|sent|subject|reply-to)\s*:[\s\S]{0,180}?(?=(?:\b(?:from|to|cc|bcc|sent|subject|reply-to)\s*:)|$)/gi;
 const FORWARDED_BLOCK_PATTERN = /(?:^|\n)\s*-{2,}\s*(?:original|forwarded)\s+message\s*-{2,}/gi;
+const REPLY_CONTEXT_PATTERN = /\bon\s+[^,\n]{2,80},\s*[^<\n]{2,80}<[^>]+>\s*wrote\s*:/gi;
+const PERSON_BEFORE_REDACTED_EMAIL_PATTERN =
+  /([A-Za-z][A-Za-z'.-]{1,30}(?:\s+[A-Za-z][A-Za-z'.-]{1,30}){1,3})\s*(?:<|\()?(\[redacted-email\])(?:>|\))?/g;
+const LONG_MACHINE_TOKEN_PATTERN = /\b[a-z0-9_-]{24,}\b/gi;
 const SIGN_OFF_PATTERN =
-  /\b(?:best regards|warm regards|kind regards|regards|thanks(?: and regards)?|sincerely)\b[\s\S]{0,180}$/i;
+  /\b(?:best regards|warm regards|kind regards|regards|thanks(?: and regards)?|sincerely)\b[\s\S]{0,900}$/i;
 const ORG_KEYWORDS = [
   "capital",
   "equities",
@@ -28,13 +35,19 @@ function escapeRegExp(value) {
 
 function parseFromHeader(rawFrom) {
   const fromText = String(rawFrom ?? "");
-  const emailMatch = fromText.match(/<([^>]+)>/);
-  const email = normalizeWhitespace((emailMatch?.[1] ?? "").toLowerCase());
-  const cleanedName = normalizeWhitespace(fromText.replace(/<[^>]+>/g, "").replace(/"/g, ""));
+  const emailMatch = fromText.match(/<([^>]+)>/) ?? fromText.match(EMAIL_CAPTURE_PATTERN);
+  const email = normalizeWhitespace((emailMatch?.[1] ?? emailMatch?.[0] ?? "").toLowerCase());
+  const cleanedName = normalizeWhitespace(
+    fromText
+      .replace(/<[^>]+>/g, "")
+      .replace(EMAIL_PATTERN, "")
+      .replace(/"/g, "")
+  );
+  const primaryName = normalizeWhitespace(cleanedName.split(/\s+via\s+/i)[0]);
 
   return {
     email,
-    name: cleanedName
+    name: primaryName || cleanedName
   };
 }
 
@@ -44,7 +57,7 @@ function isLikelyPersonName(value) {
     return false;
   }
 
-  if (candidate.length < 5 || candidate.length > 60) {
+  if (candidate.length < 4 || candidate.length > 80) {
     return false;
   }
 
@@ -58,11 +71,15 @@ function isLikelyPersonName(value) {
   }
 
   const parts = candidate.split(" ").filter(Boolean);
-  if (parts.length < 2 || parts.length > 4) {
+  if (parts.length < 2 || parts.length > 5) {
     return false;
   }
 
-  return parts.every((part) => /^[A-Z][a-z'-]{1,}$/.test(part));
+  if (parts.some((part) => part.length > 30 || !/^[A-Za-z][A-Za-z'.-]{0,}$/.test(part))) {
+    return false;
+  }
+
+  return parts.some((part) => /[a-z]/.test(part));
 }
 
 function replaceToken(text, token, replacement) {
@@ -76,12 +93,21 @@ function replaceToken(text, token, replacement) {
 
 function maybeStripTailSignature(text) {
   const match = text.match(SIGN_OFF_PATTERN);
-  if (!match || !match.index) {
+  if (!match || typeof match.index !== "number" || match.index <= 0) {
     return text;
   }
 
   const prefix = text.slice(0, match.index);
   return normalizeWhitespace(prefix) || text;
+}
+
+function redactNamesAroundEmails(text) {
+  return text.replace(PERSON_BEFORE_REDACTED_EMAIL_PATTERN, (match, possibleName) => {
+    if (!isLikelyPersonName(possibleName)) {
+      return match;
+    }
+    return "[redacted-person]";
+  });
 }
 
 export function redactPiiText(value, options = {}) {
@@ -102,8 +128,13 @@ export function redactPiiText(value, options = {}) {
   text = text
     .replace(FORWARDED_BLOCK_PATTERN, " ")
     .replace(HEADER_LINE_PATTERN, " ")
+    .replace(INLINE_HEADER_SEGMENT_PATTERN, " ")
+    .replace(REPLY_CONTEXT_PATTERN, " ")
     .replace(EMAIL_PATTERN, "[redacted-email]")
-    .replace(PHONE_PATTERN, "[redacted-phone]");
+    .replace(PHONE_PATTERN, "[redacted-phone]")
+    .replace(LONG_MACHINE_TOKEN_PATTERN, " ");
+
+  text = redactNamesAroundEmails(text);
 
   if (senderEmail) {
     text = replaceToken(text, senderEmail, "[redacted-sender]");
