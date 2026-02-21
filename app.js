@@ -244,6 +244,15 @@ const state = {
     page: 1,
     pageSize: 20
   },
+  companyUpdates: {
+    items: [],
+    total: 0,
+    limit: 100,
+    offset: 0,
+    loading: false,
+    error: "",
+    fetchedAt: null
+  },
   notifications: {
     items: [],
     total: 0,
@@ -369,8 +378,10 @@ const refs = {
   filterType: document.getElementById("filter-type"),
   filterSearch: document.getElementById("filter-search"),
   filterDuplicates: document.getElementById("filter-duplicates"),
+  refreshCompanyUpdatesBtn: document.getElementById("refresh-company-updates-btn"),
   chipRow: document.getElementById("control-chip-row"),
   kpiGrid: document.getElementById("kpi-grid"),
+  dashboardUpdatesMeta: document.getElementById("dashboard-updates-meta"),
   brokerLanes: document.getElementById("broker-lanes"),
   runExtractionBtn: document.getElementById("run-extraction-btn"),
   refreshExtractionBtn: document.getElementById("refresh-extraction-btn"),
@@ -590,7 +601,7 @@ function bindEvents() {
     }
 
     refs.runIngestBtn.disabled = true;
-    setPipelineMessage("Running ingest + extraction...");
+    setPipelineMessage("Running ingest + company extraction...");
 
     try {
       const response = await apiFetch("/api/gmail/ingest", {
@@ -601,10 +612,14 @@ function bindEvents() {
       });
 
       const summary = response.summary;
-      const extraction = response.extraction || null;
+      const companyPipeline = response.companyUpdatePipeline || {};
       const fetchedCount = Number(summary.fetchedMessages || 0);
       const archivedCount = Number(summary.archivedCount || 0);
       const skippedCount = Number(summary.skippedCount || 0);
+      const extractedCount = Number(companyPipeline.extractedCompanyUpdates || 0);
+      const duplicatesMarked = Number(companyPipeline.duplicatesMarked || 0);
+      const aiFailures = Number(companyPipeline.aiFailedEmails || 0);
+      const companyPipelineError = String(companyPipeline.error || "").trim();
       const cursorAfter = Number(summary.cursorAfterEpoch || 0);
       const cursorLabel = cursorAfter > 0 ? new Date(cursorAfter * 1000).toLocaleString() : "not set";
       if (fetchedCount === 0) {
@@ -612,41 +627,14 @@ function bindEvents() {
           `Ingest complete: fetched 0 messages. Cursor is ${cursorLabel}. If you expected older emails, open Ingest setup and check "Backfill older emails (reset cursor to oldest)".`
         );
       } else {
-        const extractionNote =
-          extraction?.run?.id && extraction?.queued
-            ? ` Extraction queued (${extraction.run.id}).`
-            : "";
         setPipelineMessage(
-          `Ingest complete: fetched ${fetchedCount}, archived ${archivedCount}, skipped ${skippedCount}.${extractionNote}`
+          `Ingest complete: fetched ${fetchedCount}, archived ${archivedCount}, skipped ${skippedCount}, extracted ${extractedCount}, duplicates marked ${duplicatesMarked}, AI failures ${aiFailures}.`
         );
       }
-      await fetchArchives();
-      if (extraction?.run?.id) {
-        setPipelineMessage(
-          `Ingest complete: fetched ${fetchedCount}, archived ${archivedCount}, skipped ${skippedCount}. Extraction run ${extraction.run.id} in progress...`
-        );
-        const completedRun = await waitForExtractionRunCompletion(extraction.run.id, {
-          timeoutMs: 120_000,
-          pollMs: 2500
-        });
-        await refreshExtractionWorkspace();
-        if (completedRun) {
-          const runStatus = String(completedRun.status || "").toLowerCase();
-          if (runStatus === "completed") {
-            setPipelineMessage(
-              `Ingest + extraction complete: fetched ${fetchedCount}, archived ${archivedCount}, extracted ${completedRun.extractedCount || 0}, duplicates ${completedRun.duplicatesCount || 0}.`
-            );
-          } else {
-            setPipelineMessage(
-              `Ingest complete, extraction ended with status ${completedRun.status}. Processed ${completedRun.processedCount || 0}.`
-            );
-          }
-        } else {
-          setPipelineMessage(
-            `Ingest complete: fetched ${fetchedCount}, archived ${archivedCount}. Extraction is still running in background.`
-          );
-        }
+      if (companyPipelineError) {
+        setPipelineMessage(`Ingest finished, but company extraction had an error: ${companyPipelineError}`);
       }
+      await Promise.allSettled([fetchArchives(), fetchCompanyUpdatesDb({ silent: true }), refreshExtractionWorkspace()]);
       if (state.view === "digest") {
         await fetchDigestPreviewFromApi();
       }
@@ -686,6 +674,12 @@ function bindEvents() {
     state.filters.includeDuplicates = event.target.checked;
     renderDashboard();
   });
+
+  if (refs.refreshCompanyUpdatesBtn) {
+    refs.refreshCompanyUpdatesBtn.addEventListener("click", async () => {
+      await fetchCompanyUpdatesDb();
+    });
+  }
 
   if (refs.runExtractionBtn) {
     refs.runExtractionBtn.addEventListener("click", async () => {
@@ -1087,39 +1081,49 @@ function renderAuthUi() {
 }
 
 function renderDashboard() {
-  const allReports = buildReports();
-  const canonicalReports = allReports.filter((report) => !report.duplicateOf);
-  const duplicateCount = allReports.length - canonicalReports.length;
+  const rows = Array.isArray(state.companyUpdates.items) ? state.companyUpdates.items : [];
+  hydrateDashboardFilters(rows);
 
-  const visibleReports = allReports.filter((report) => {
-    if (!state.filters.includeDuplicates && report.duplicateOf) {
-      return false;
-    }
-
-    if (state.ignoredCompanies.includes(report.canonicalCompany)) {
-      return false;
-    }
-
-    if (state.filters.broker !== "All" && report.broker !== state.filters.broker) {
-      return false;
-    }
-
-    if (state.filters.type !== "All" && report.type !== state.filters.type) {
-      return false;
-    }
-
-    if (state.filters.search) {
-      const query = state.filters.search.toLowerCase();
-      const haystack = `${report.canonicalCompany} ${report.summary}`.toLowerCase();
-      if (!haystack.includes(query)) {
+  const allRows = rows.filter((row) => row && typeof row === "object");
+  const canonicalRows = allRows.filter((row) => row.isDuplicate !== true);
+  const duplicateCount = allRows.length - canonicalRows.length;
+  const visibleRows = allRows
+    .filter((row) => {
+      const companyName = normalizeDashboardCompany(row.company);
+      if (!state.filters.includeDuplicates && row.isDuplicate === true) {
         return false;
       }
-    }
 
-    return true;
-  });
+      if (state.ignoredCompanies.includes(companyName)) {
+        return false;
+      }
 
-  const priorityHitCount = canonicalReports.filter((report) => state.priorityCompanies.includes(report.canonicalCompany)).length;
+      if (state.filters.broker !== "All" && row.brokerage !== state.filters.broker) {
+        return false;
+      }
+
+      const reportType = normalizeDashboardReportType(row.reportType);
+      if (state.filters.type !== "All" && reportType !== state.filters.type) {
+        return false;
+      }
+
+      if (state.filters.search) {
+        const query = state.filters.search.toLowerCase();
+        const haystack = `${companyName} ${row.summary} ${row.brokerage} ${reportType}`.toLowerCase();
+        if (!haystack.includes(query)) {
+          return false;
+        }
+      }
+
+      return true;
+    })
+    .sort((left, right) => {
+      const leftTime = new Date(left.date || 0).getTime();
+      const rightTime = new Date(right.date || 0).getTime();
+      return rightTime - leftTime;
+    });
+
+  const priorityHitCount = canonicalRows.filter((row) => state.priorityCompanies.includes(normalizeDashboardCompany(row.company))).length;
 
   refs.chipRow.innerHTML = `
     ${state.priorityCompanies
@@ -1130,127 +1134,137 @@ function renderDashboard() {
 
   refs.kpiGrid.innerHTML = `
     <article class="kpi">
-      <h4>Raw Reports</h4>
-      <p>${allReports.length}</p>
-      <small>seed + ingested archive</small>
+      <h4>Total Updates</h4>
+      <p>${allRows.length}</p>
+      <small>company-wise rows from DB</small>
     </article>
     <article class="kpi">
-      <h4>Canonical Reports</h4>
-      <p>${canonicalReports.length}</p>
-      <small>dedupe primary events</small>
+      <h4>Unique Updates</h4>
+      <p>${canonicalRows.length}</p>
+      <small>duplicates excluded</small>
     </article>
     <article class="kpi">
-      <h4>Collapsed Duplicates</h4>
+      <h4>Duplicates Marked</h4>
       <p>${duplicateCount}</p>
-      <small>roundup repeats removed</small>
+      <small>same broker, company, similar update</small>
     </article>
     <article class="kpi">
       <h4>Priority Hits</h4>
       <p>${priorityHitCount}</p>
-      <small>ranked first in digest</small>
+      <small>in your priority list</small>
     </article>
   `;
 
-  const groupedByCompany = groupBy(visibleReports, "canonicalCompany");
-  const companies = Object.keys(groupedByCompany).sort((left, right) => {
-    const leftLatest = Math.max(...groupedByCompany[left].map((item) => item.timestamp || 0));
-    const rightLatest = Math.max(...groupedByCompany[right].map((item) => item.timestamp || 0));
-    return rightLatest - leftLatest;
-  });
+  if (refs.dashboardUpdatesMeta) {
+    const fetchedText = state.companyUpdates.fetchedAt
+      ? new Date(state.companyUpdates.fetchedAt).toLocaleString()
+      : "not fetched yet";
+    refs.dashboardUpdatesMeta.className = state.companyUpdates.error ? "note warn" : "note";
+    refs.dashboardUpdatesMeta.textContent = state.companyUpdates.error
+      ? `Failed to load company updates: ${state.companyUpdates.error}`
+      : `${visibleRows.length} visible rows (${state.companyUpdates.total} total loaded). Last fetch: ${fetchedText}.`;
+  }
 
-  if (companies.length === 0) {
-    refs.brokerLanes.innerHTML = `<div class="empty-state">No reports match the selected filters.</div>`;
+  if (state.companyUpdates.loading && allRows.length === 0) {
+    refs.brokerLanes.innerHTML = '<tr><td colspan="6"><div class="empty-state">Loading company updates...</div></td></tr>';
     return;
   }
 
-  refs.brokerLanes.innerHTML = companies
-    .map((company, index) => {
-      const companyReports = groupedByCompany[company].sort((a, b) => b.timestamp - a.timestamp);
-      const canonicalCount = companyReports.filter((report) => !report.duplicateOf).length;
-      const duplicateCountForCompany = Math.max(0, companyReports.length - canonicalCount);
-      const brokerCount = new Set(companyReports.map((report) => report.broker)).size;
-      const latest = companyReports[0];
-      const latestCanonical = companyReports.find((report) => !report.duplicateOf) || latest;
-      const companyHeadline = buildDisplaySummary(latestCanonical?.summary || "", latestCanonical?.insights || []);
-      const updateTypeCounts = Object.entries(groupBy(companyReports, "type"))
-        .sort((left, right) => right[1].length - left[1].length)
-        .slice(0, 4);
-      const typeCountHtml = updateTypeCounts
-        .map(([type, reports]) => `<span class="broker-count-chip">${escapeHtml(type)}: ${reports.length}</span>`)
-        .join("");
+  if (state.companyUpdates.error && allRows.length === 0) {
+    refs.brokerLanes.innerHTML = `<tr><td colspan="6"><div class="empty-state">Failed to load company updates: ${escapeHtml(
+      state.companyUpdates.error
+    )}</div></td></tr>`;
+    return;
+  }
 
-      const previewLimit = 4;
-      const previewItems = companyReports.slice(0, previewLimit);
-      const hiddenCount = Math.max(0, companyReports.length - previewItems.length);
-      const mappedEmailHtml = previewItems
-        .map((report) => {
-          const primaryInsight = buildDisplaySummary(report.summary, report.insights);
-          const secondaryInsights = buildDisplayInsights(report.insights, report.summary, 3).slice(1, 3);
-          const dedupeTag = report.duplicateOf
-            ? `<span class="tag duplicate" title="Duplicate of ${escapeAttribute(report.duplicateOf)}">Duplicate</span>`
-            : `<span class="tag">Canonical</span>`;
-          const dedupeDetail = report.duplicateOf
-            ? `<p class="company-report-dedupe">Duplicate of ${escapeHtml(truncateDisplayText(report.duplicateOf, 42))}</p>`
-            : "";
-          const insightListHtml =
-            secondaryInsights.length > 0
-              ? `<ul class="company-report-insights">${secondaryInsights
-                  .map((insight) => `<li>${escapeHtml(insight)}</li>`)
-                  .join("")}</ul>`
-              : "";
-          const sourceHref = report.links?.archive || "#";
-          const sourceLabel = report.sourceEmailLabel || report.title || report.id || "Mapped email";
-          const sourceMapHtml =
-            sourceHref && sourceHref !== "#"
-              ? `<a class="link-btn company-report-source" href="${escapeAttribute(sourceHref)}" target="_blank" rel="noopener">Mapped email: ${escapeHtml(
-                  truncateDisplayText(sourceLabel, 90)
-                )}</a>`
-              : `<span class="company-report-source-text">Mapped email: ${escapeHtml(truncateDisplayText(sourceLabel, 90))}</span>`;
+  if (allRows.length === 0) {
+    refs.brokerLanes.innerHTML =
+      '<tr><td colspan="6"><div class="empty-state">No company updates yet. Run ingest to start extraction.</div></td></tr>';
+    return;
+  }
 
-          return `
-            <li class="company-report-item">
-              <div class="company-report-head">
-                <span class="tag ${tagClassForType(report.type)}">${escapeHtml(report.type)}</span>
-                ${dedupeTag}
-                <span class="company-report-broker">${escapeHtml(report.broker)}</span>
-                <span class="company-report-time">${escapeHtml(formatTime(report.time))}</span>
-              </div>
-              <p class="company-report-summary">${escapeHtml(primaryInsight)}</p>
-              ${insightListHtml}
-              ${dedupeDetail}
-              ${sourceMapHtml}
-            </li>
-          `;
-        })
-        .join("");
+  if (visibleRows.length === 0) {
+    refs.brokerLanes.innerHTML =
+      '<tr><td colspan="6"><div class="empty-state">No rows match the current filters.</div></td></tr>';
+    return;
+  }
+
+  refs.brokerLanes.innerHTML = visibleRows
+    .map((row) => {
+      const reportType = normalizeDashboardReportType(row.reportType);
+      const sourceArchiveLink = row?.sourceLinks?.archive
+        ? `<a class="link-btn" href="${escapeAttribute(toApiAbsolute(row.sourceLinks.archive))}" target="_blank" rel="noopener">Open email</a>`
+        : "";
+      const sourceAttachmentLink = row?.sourceLinks?.attachment
+        ? `<a class="link-btn" href="${escapeAttribute(toApiAbsolute(row.sourceLinks.attachment))}" target="_blank" rel="noopener">Open attachment</a>`
+        : "";
+      const sourceDetails =
+        sourceArchiveLink || sourceAttachmentLink
+          ? `<div class="archive-links">${sourceArchiveLink}${sourceAttachmentLink}</div>`
+          : "";
+      const duplicateTag = row.isDuplicate === true ? '<span class="tag warn">Duplicate</span>' : "";
 
       return `
-        <section class="lane broker-${(index % 3) + 1}">
-          <header>${escapeHtml(company)} · Company Insights</header>
-          <div class="lane-body">
-            <article class="broker-summary-card">
-              <div class="broker-summary-grid">
-                <div><strong>Total updates:</strong> ${companyReports.length}</div>
-                <div><strong>Canonical:</strong> ${canonicalCount}</div>
-                <div><strong>Duplicates:</strong> ${duplicateCountForCompany}</div>
-                <div><strong>Brokers:</strong> ${brokerCount}</div>
-                <div><strong>Priority:</strong> ${state.priorityCompanies.includes(company) ? "Yes" : "No"}</div>
-                <div><strong>Latest:</strong> ${escapeHtml(formatDateTime(latest?.time || latest?.publishedAt || ""))}</div>
-              </div>
-              <p class="company-lane-summary"><strong>Top insight:</strong> ${escapeHtml(companyHeadline)}</p>
-              <div class="broker-count-row">${typeCountHtml || '<span class="broker-count-chip">No report types</span>'}</div>
-              <ul class="company-report-list">${mappedEmailHtml}</ul>
-              ${
-                hiddenCount > 0
-                  ? `<div class="company-report-hidden">+${hiddenCount} more mapped updates (use filters to narrow).</div>`
-                  : ""
-              }
-            </article>
-          </div>
-        </section>
+        <tr>
+          <td>${escapeHtml(formatDateTime(row.date || ""))}</td>
+          <td>${escapeHtml(normalizeDashboardCompany(row.company || "Unknown Company"))}</td>
+          <td>${escapeHtml(row.brokerage || "Unmapped Broker")}</td>
+          <td>${escapeHtml(reportType)}</td>
+          <td>
+            <div class="extracted-summary">${escapeHtml(row.summary || "")}</div>
+            ${duplicateTag}
+            ${sourceDetails}
+          </td>
+          <td><span class="tag">${escapeHtml(row.decision || "UNKNOWN")}</span></td>
+        </tr>
       `;
     })
     .join("");
+}
+
+function normalizeDashboardReportType(value) {
+  return String(value || "Other")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (part) => part.toUpperCase());
+}
+
+function normalizeDashboardCompany(value) {
+  const company = String(value || "").trim();
+  if (!company) {
+    return "Unknown Company";
+  }
+  if (company.toUpperCase().startsWith("SECTOR:")) {
+    const sector = company.slice("SECTOR:".length).trim();
+    return sector || "Unknown Sector";
+  }
+  return company;
+}
+
+function hydrateDashboardFilters(rows) {
+  const allRows = Array.isArray(rows) ? rows : [];
+
+  const brokers = Array.from(new Set(allRows.map((row) => row?.brokerage).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  refs.filterBroker.innerHTML = [`<option value="All">All</option>`, ...brokers.map((broker) => `<option>${escapeHtml(broker)}</option>`)].join(
+    ""
+  );
+  if (!brokers.includes(state.filters.broker)) {
+    state.filters.broker = "All";
+  }
+  refs.filterBroker.value = state.filters.broker;
+
+  const reportTypes = Array.from(new Set(allRows.map((row) => normalizeDashboardReportType(row?.reportType)).filter(Boolean))).sort(
+    (a, b) => a.localeCompare(b)
+  );
+  refs.filterType.innerHTML = [
+    `<option value="All">All</option>`,
+    ...reportTypes.map((reportType) => `<option value="${escapeAttribute(reportType)}">${escapeHtml(reportType)}</option>`)
+  ].join("");
+  if (!reportTypes.includes(state.filters.type)) {
+    state.filters.type = "All";
+  }
+  refs.filterType.value = state.filters.type;
 }
 
 function renderExtractionWorkspace() {
@@ -2227,7 +2241,10 @@ function renderNotifications() {
 }
 
 function hydrateBrokerFilter() {
-  const brokers = Array.from(new Set(buildReports().map((report) => report.broker))).sort();
+  const sourceRows = state.companyUpdates.items.length > 0 ? state.companyUpdates.items : buildReports();
+  const brokers = Array.from(
+    new Set(sourceRows.map((row) => (state.companyUpdates.items.length > 0 ? row.brokerage : row.broker)).filter(Boolean))
+  ).sort();
   refs.filterBroker.innerHTML = [`<option value="All">All</option>`, ...brokers.map((broker) => `<option>${escapeHtml(broker)}</option>`)].join("");
 }
 
@@ -2249,6 +2266,37 @@ function buildReports() {
     for (const alias of entry.aliases) {
       dictionaryMap.set(normalizeKey(alias), entry.canonical);
     }
+  }
+
+  if (state.companyUpdates.items.length > 0) {
+    return state.companyUpdates.items.map((row) => {
+      const decision = String(row.decision || "UNKNOWN").toUpperCase();
+      const sentiment = decision === "BUY" || decision === "ADD" ? "bullish" : decision === "SELL" || decision === "REDUCE" ? "bearish" : "neutral";
+      const reportTypeLabel = normalizeDashboardReportType(row.reportType || "Other");
+
+      return normalizeReport(
+        {
+          id: `db-${row.id}`,
+          broker: row.brokerage || "Unmapped Broker",
+          company: normalizeDashboardCompany(row.company || "Unknown Company"),
+          type: reportTypeLabel,
+          coverage: row.isDuplicate ? "DB Duplicate" : "DB Canonical",
+          time: row.date || new Date().toISOString(),
+          summary: row.summary || "",
+          insights: buildDisplayInsights([], row.summary || "", 3),
+          sourceEmailLabel: row.sourceEmailSubject || row.emailRecordId || "",
+          sourceArchiveId: row.archiveId || "",
+          sentiment,
+          duplicateOf: row.isDuplicate ? row.duplicateOfUpdateId || null : null,
+          links: {
+            archive: row?.sourceLinks?.archive ? toApiAbsolute(row.sourceLinks.archive) : "#",
+            pdf: row?.sourceLinks?.attachment ? toApiAbsolute(row.sourceLinks.attachment) : "#",
+            gmail: row?.sourceLinks?.gmail ? toApiAbsolute(row.sourceLinks.gmail) : "#"
+          }
+        },
+        dictionaryMap
+      );
+    });
   }
 
   if (state.extraction.reports.length > 0) {
@@ -2630,7 +2678,7 @@ async function resetPipelineDataForCurrentUser() {
   }
 
   const confirmed = window.confirm(
-    "This will delete your archived emails, extraction runs, and extracted reports, and reset ingest cursor to oldest. Continue?"
+    "This will delete your archived emails and company updates from DB, clear extraction workspace data, and reset ingest cursor to oldest. Continue?"
   );
   if (!confirmed) {
     return;
@@ -2676,17 +2724,21 @@ async function resetPipelineDataForCurrentUser() {
     state.extraction.reportsTotal = 0;
     state.extraction.fetchedAt = null;
     state.extraction.statusMessage = "Extraction workspace reset. Run ingest with a small date range to retest.";
+    state.companyUpdates.items = [];
+    state.companyUpdates.total = 0;
+    state.companyUpdates.error = "";
+    state.companyUpdates.fetchedAt = null;
     state.digestApi.preview = null;
     state.digestApi.error = "";
     state.digestApi.lastSentAt = null;
 
-    await Promise.allSettled([fetchArchives(), refreshExtractionWorkspace()]);
+    await Promise.allSettled([fetchArchives(), fetchCompanyUpdatesDb({ silent: true }), refreshExtractionWorkspace()]);
 
     const forcedAbortText = payload.force && Number(payload.forcedAbortCount || 0) > 0
       ? ` Aborted ${payload.forcedAbortCount} active run(s) as part of force reset.`
       : "";
     setPipelineMessage(
-      `Reset complete: removed ${payload.removedArchives || 0} archives, ${payload.removedExtractedReports || 0} extracted reports, ${payload.removedExtractionRuns || 0} extraction runs.${forcedAbortText}`
+      `Reset complete: removed ${payload.removedArchives || 0} archives, ${payload.removedIngestedEmails || 0} ingested emails, ${payload.removedCompanyUpdates || 0} company updates, ${payload.removedExtractedReports || 0} extracted reports, ${payload.removedExtractionRuns || 0} extraction runs.${forcedAbortText}`
     );
     state.ingestSetup.statusMessage = "Reset complete. Configure labels/date range, then run ingest.";
     renderAllDataViews();
@@ -2711,6 +2763,10 @@ async function refreshAuthState() {
     state.digestApi.lastSentAt = null;
     state.archives.items = [];
     state.archives.total = 0;
+    state.companyUpdates.items = [];
+    state.companyUpdates.total = 0;
+    state.companyUpdates.error = "";
+    state.companyUpdates.fetchedAt = null;
     resetExtractionStateForSignedOut();
     renderAllDataViews();
     return;
@@ -2741,8 +2797,7 @@ async function refreshAuthState() {
       setPipelineMessage("Auth connected.");
     }
 
-    await fetchArchives();
-    await refreshExtractionWorkspace();
+    await Promise.allSettled([fetchArchives(), fetchCompanyUpdatesDb({ silent: true }), refreshExtractionWorkspace()]);
     if (state.view === "digest") {
       await fetchDigestPreviewFromApi();
     }
@@ -2754,6 +2809,10 @@ async function refreshAuthState() {
     state.digestApi.preview = null;
     state.digestApi.error = "";
     state.digestApi.lastSentAt = null;
+    state.companyUpdates.items = [];
+    state.companyUpdates.total = 0;
+    state.companyUpdates.error = "";
+    state.companyUpdates.fetchedAt = null;
     resetExtractionStateForSignedOut();
     setPipelineMessage("Session expired. Please sign in with Google again.");
   } finally {
@@ -2813,6 +2872,10 @@ async function signOut() {
   state.digestApi.lastSentAt = null;
   state.archives.items = [];
   state.archives.total = 0;
+  state.companyUpdates.items = [];
+  state.companyUpdates.total = 0;
+  state.companyUpdates.error = "";
+  state.companyUpdates.fetchedAt = null;
   resetExtractionStateForSignedOut();
   closeIngestSetupModal();
   setPipelineMessage("Signed out.");
@@ -2866,6 +2929,52 @@ async function fetchArchives() {
     hydrateCompanySelect();
   } catch (error) {
     setPipelineMessage(`Failed to load archives: ${error.message}`);
+  }
+}
+
+async function fetchCompanyUpdatesDb(options = {}) {
+  const silent = options.silent === true;
+
+  if (!state.auth.token) {
+    state.companyUpdates.items = [];
+    state.companyUpdates.total = 0;
+    state.companyUpdates.error = "";
+    state.companyUpdates.fetchedAt = null;
+    renderDashboard();
+    return;
+  }
+
+  state.companyUpdates.loading = true;
+  state.companyUpdates.error = "";
+  renderDashboard();
+
+  try {
+    const params = new URLSearchParams();
+    params.set("limit", String(state.companyUpdates.limit || 500));
+    params.set("offset", "0");
+    params.set("includeDuplicates", "true");
+    const response = await apiFetch(`/api/company-updates?${params.toString()}`);
+    state.companyUpdates.items = Array.isArray(response.items) ? response.items : [];
+    state.companyUpdates.total = Number(response.total ?? state.companyUpdates.items.length);
+    state.companyUpdates.offset = Number(response.offset || 0);
+    state.companyUpdates.fetchedAt = new Date().toISOString();
+    hydrateCompanySelect();
+
+    if (!silent) {
+      const loadedCount = state.companyUpdates.items.length;
+      setPipelineMessage(`Loaded ${loadedCount} company updates from DB.`);
+    }
+  } catch (error) {
+    state.companyUpdates.error = error instanceof Error ? error.message : "Failed to load company updates";
+    if (!silent) {
+      setPipelineMessage(`Failed to load company updates: ${state.companyUpdates.error}`);
+    }
+  } finally {
+    state.companyUpdates.loading = false;
+    renderDashboard();
+    if (state.view === "company") {
+      renderCompanyView();
+    }
   }
 }
 

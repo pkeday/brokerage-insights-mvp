@@ -13,6 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { createExtractionOrchestrator } from "./services/extraction-orchestration.js";
+import { createCompanyUpdateExtractor } from "./services/company-update-extractor.js";
 import { redactPiiText } from "./extraction/pii-redaction.js";
 
 const port = Number.parseInt(process.env.PORT ?? "10001", 10);
@@ -86,6 +87,8 @@ const dbSnapshotTable = isSafeSqlIdentifier(configuredDbSnapshotTable)
   ? configuredDbSnapshotTable
   : "brokerage_insights_mvp_state";
 const dbSnapshotId = process.env.BROKERAGE_DB_STATE_ID?.trim() || "primary";
+const ingestedEmailsTable = "brokerage_ingested_emails";
+const companyUpdatesTable = "brokerage_company_updates";
 
 function isSafeSqlIdentifier(value) {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(value ?? ""));
@@ -152,6 +155,12 @@ const extractionOrchestrator = await createExtractionOrchestrator({
   persistDb,
   newId,
   log
+});
+const companyUpdateExtractor = createCompanyUpdateExtractor({
+  apiKey: process.env.OPENAI_API_KEY,
+  model: process.env.COMPANY_EXTRACTION_MODEL || process.env.OPENAI_SUMMARY_MODEL || "gpt-4.1-mini",
+  enabled: process.env.COMPANY_EXTRACTION_AI_ENABLED ?? "true",
+  baseUrl: process.env.OPENAI_BASE_URL || "https://api.openai.com/v1"
 });
 
 if (!configuredAuthSecret) {
@@ -258,6 +267,66 @@ async function initializeDatabase() {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
+    await databasePool.query(`
+      CREATE TABLE IF NOT EXISTS ${ingestedEmailsTable} (
+        id BIGSERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        archive_id TEXT,
+        gmail_message_id TEXT NOT NULL,
+        gmail_thread_id TEXT,
+        broker TEXT NOT NULL,
+        sender TEXT,
+        subject TEXT,
+        snippet TEXT,
+        body_preview TEXT,
+        message_date TIMESTAMPTZ,
+        ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        attachments JSONB NOT NULL DEFAULT '[]'::jsonb,
+        raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+        ai_status TEXT NOT NULL DEFAULT 'pending',
+        ai_error TEXT,
+        ai_extracted_at TIMESTAMPTZ,
+        dedupe_checked_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (user_id, gmail_message_id)
+      );
+      CREATE INDEX IF NOT EXISTS ${ingestedEmailsTable}_user_ingested_idx
+        ON ${ingestedEmailsTable} (user_id, ingested_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS ${ingestedEmailsTable}_user_status_idx
+        ON ${ingestedEmailsTable} (user_id, ai_status, id DESC);
+    `);
+    await databasePool.query(`
+      CREATE TABLE IF NOT EXISTS ${companyUpdatesTable} (
+        id BIGSERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        email_record_id BIGINT NOT NULL REFERENCES ${ingestedEmailsTable}(id) ON DELETE CASCADE,
+        archive_id TEXT,
+        broker TEXT NOT NULL,
+        company_raw TEXT,
+        company_canonical TEXT NOT NULL,
+        report_type TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+        confidence NUMERIC(5,4),
+        published_at TIMESTAMPTZ,
+        is_duplicate BOOLEAN NOT NULL DEFAULT FALSE,
+        duplicate_of_update_id BIGINT REFERENCES ${companyUpdatesTable}(id) ON DELETE SET NULL,
+        dedupe_reason TEXT,
+        dedupe_score NUMERIC(5,4),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS ${companyUpdatesTable}_user_date_idx
+        ON ${companyUpdatesTable} (user_id, COALESCE(published_at, created_at) DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS ${companyUpdatesTable}_user_company_broker_idx
+        ON ${companyUpdatesTable} (user_id, company_canonical, broker, id DESC);
+      CREATE INDEX IF NOT EXISTS ${companyUpdatesTable}_user_duplicate_idx
+        ON ${companyUpdatesTable} (user_id, is_duplicate, id DESC);
+      CREATE INDEX IF NOT EXISTS ${companyUpdatesTable}_email_idx
+        ON ${companyUpdatesTable} (email_record_id, id DESC);
+    `);
     databaseReady = true;
     log("Postgres storage initialized", { table: dbSnapshotTable });
   } catch (error) {
@@ -292,6 +361,408 @@ async function writeDbToDatabase(value) {
      DO UPDATE SET state_json = EXCLUDED.state_json, updated_at = NOW()`,
     [dbSnapshotId, JSON.stringify(value)]
   );
+}
+
+function normalizeText(value) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeIsoTimestamp(value) {
+  const text = normalizeText(value);
+  if (!text) {
+    return null;
+  }
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  return parsed.toISOString();
+}
+
+function normalizeReportTypeLabel(value) {
+  const normalized = normalizeText(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  const map = {
+    initiating_coverage: "Initiating Coverage",
+    initiation: "Initiating Coverage",
+    results_update: "Results Update",
+    result_update: "Results Update",
+    general_update: "General Update",
+    sector_update: "Sector Update",
+    target_price_change: "Target Price Change",
+    rating_change: "Rating Change",
+    management_commentary: "Management Commentary",
+    corporate_action: "Corporate Action",
+    other: "Other"
+  };
+  return map[normalized] || "Other";
+}
+
+function normalizeDecisionLabel(value) {
+  const normalized = normalizeText(value).toUpperCase();
+  const allowed = new Set(["BUY", "SELL", "HOLD", "ADD", "REDUCE", "UNKNOWN"]);
+  if (allowed.has(normalized)) {
+    return normalized;
+  }
+  if (!normalized) {
+    return "UNKNOWN";
+  }
+  if (normalized.includes("BUY") || normalized.includes("OUTPERFORM") || normalized.includes("OVERWEIGHT")) {
+    return "BUY";
+  }
+  if (normalized.includes("SELL") || normalized.includes("UNDERPERFORM") || normalized.includes("UNDERWEIGHT")) {
+    return "SELL";
+  }
+  if (normalized.includes("HOLD") || normalized.includes("NEUTRAL")) {
+    return "HOLD";
+  }
+  if (normalized.includes("ADD")) {
+    return "ADD";
+  }
+  if (normalized.includes("REDUCE") || normalized.includes("TRIM")) {
+    return "REDUCE";
+  }
+  return "UNKNOWN";
+}
+
+function normalizeSimilarityTokens(value) {
+  const stopWords = new Set([
+    "the",
+    "and",
+    "for",
+    "with",
+    "from",
+    "that",
+    "this",
+    "have",
+    "has",
+    "was",
+    "were",
+    "update",
+    "report",
+    "broker",
+    "note",
+    "company"
+  ]);
+  return normalizeText(value)
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9 ]+/g, " ")
+    .split(/\s+/)
+    .filter((token) => token.length >= 3 && !stopWords.has(token));
+}
+
+function jaccardSimilarity(leftText, rightText) {
+  const leftSet = new Set(normalizeSimilarityTokens(leftText));
+  const rightSet = new Set(normalizeSimilarityTokens(rightText));
+  if (leftSet.size === 0 || rightSet.size === 0) {
+    return 0;
+  }
+
+  let intersection = 0;
+  for (const token of leftSet) {
+    if (rightSet.has(token)) {
+      intersection += 1;
+    }
+  }
+  const union = leftSet.size + rightSet.size - intersection;
+  return union <= 0 ? 0 : intersection / union;
+}
+
+function toSafeNumber(value, fallback = 0) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+async function executePipelineDbQuery(queryText, values = []) {
+  if (!isDatabaseEnabled()) {
+    throw new Error("Postgres database is required for DB-first pipeline.");
+  }
+  return databasePool.query(queryText, values);
+}
+
+async function upsertIngestedEmailRecord(user, item) {
+  const messageDate = normalizeIsoTimestamp(item.dateHeader) || normalizeIsoTimestamp(item.ingestedAt);
+  const ingestedAt = normalizeIsoTimestamp(item.ingestedAt) || new Date().toISOString();
+  const attachments = Array.isArray(item.attachments) ? item.attachments : [];
+  const rawPayload = {
+    archiveId: item.id,
+    gmailMessageUrl: item.gmailMessageUrl || "",
+    duplicateOfArchiveId: item.duplicateOfArchiveId || null
+  };
+
+  const result = await executePipelineDbQuery(
+    `INSERT INTO ${ingestedEmailsTable} (
+      user_id, archive_id, gmail_message_id, gmail_thread_id, broker, sender, subject, snippet, body_preview,
+      message_date, ingested_at, attachments, raw_payload, ai_status, ai_error, ai_extracted_at, dedupe_checked_at, updated_at
+    ) VALUES (
+      $1, $2, $3, $4, $5, $6, $7, $8, $9,
+      $10, $11, $12::jsonb, $13::jsonb, 'pending', NULL, NULL, NULL, NOW()
+    )
+    ON CONFLICT (user_id, gmail_message_id)
+    DO UPDATE SET
+      archive_id = EXCLUDED.archive_id,
+      gmail_thread_id = EXCLUDED.gmail_thread_id,
+      broker = EXCLUDED.broker,
+      sender = EXCLUDED.sender,
+      subject = EXCLUDED.subject,
+      snippet = EXCLUDED.snippet,
+      body_preview = EXCLUDED.body_preview,
+      message_date = EXCLUDED.message_date,
+      ingested_at = EXCLUDED.ingested_at,
+      attachments = EXCLUDED.attachments,
+      raw_payload = EXCLUDED.raw_payload,
+      ai_status = 'pending',
+      ai_error = NULL,
+      ai_extracted_at = NULL,
+      dedupe_checked_at = NULL,
+      updated_at = NOW()
+    RETURNING id, archive_id, gmail_message_id, gmail_thread_id, broker, sender, subject, snippet, body_preview, message_date, ingested_at, attachments, raw_payload`,
+    [
+      user.id,
+      item.id || null,
+      item.gmailMessageId || "",
+      item.gmailThreadId || "",
+      item.broker || "Unmapped Broker",
+      item.from || "",
+      item.subject || "",
+      item.snippet || "",
+      item.bodyPreview || "",
+      messageDate,
+      ingestedAt,
+      JSON.stringify(attachments),
+      JSON.stringify(rawPayload)
+    ]
+  );
+  return result.rows[0] || null;
+}
+
+async function setIngestedEmailAiStatus(userId, emailRecordId, status, errorMessage = null) {
+  await executePipelineDbQuery(
+    `UPDATE ${ingestedEmailsTable}
+       SET ai_status = $3,
+           ai_error = $4,
+           ai_extracted_at = CASE WHEN $3 = 'completed' THEN NOW() ELSE ai_extracted_at END,
+           updated_at = NOW()
+     WHERE user_id = $1 AND id = $2`,
+    [userId, emailRecordId, status, errorMessage]
+  );
+}
+
+async function replaceCompanyUpdatesForEmail(userId, emailRecord, extractedRecords, extractionSource, rawResponse) {
+  await executePipelineDbQuery(`DELETE FROM ${companyUpdatesTable} WHERE user_id = $1 AND email_record_id = $2`, [
+    userId,
+    emailRecord.id
+  ]);
+
+  if (!Array.isArray(extractedRecords) || extractedRecords.length === 0) {
+    return { inserted: 0 };
+  }
+
+  let inserted = 0;
+  for (const record of extractedRecords) {
+    const payload = {
+      extractionSource,
+      rawModelOutput: record.sourcePayload || {},
+      modelEnvelope: rawResponse && typeof rawResponse === "object" ? rawResponse : {}
+    };
+    await executePipelineDbQuery(
+      `INSERT INTO ${companyUpdatesTable} (
+        user_id, email_record_id, archive_id, broker, company_raw, company_canonical, report_type,
+        summary, decision, payload, confidence, published_at, is_duplicate, duplicate_of_update_id,
+        dedupe_reason, dedupe_score, created_at, updated_at
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7,
+        $8, $9, $10::jsonb, $11, $12, FALSE, NULL,
+        NULL, NULL, NOW(), NOW()
+      )`,
+      [
+        userId,
+        emailRecord.id,
+        emailRecord.archive_id || null,
+        normalizeText(record.broker || emailRecord.broker || "Unmapped Broker"),
+        normalizeText(record.companyRaw || "Unknown Company"),
+        normalizeText(record.companyCanonical || "Unknown Company"),
+        normalizeReportTypeLabel(record.reportType),
+        normalizeText(record.summary || "No summary available."),
+        normalizeDecisionLabel(record.decision),
+        JSON.stringify(payload),
+        toSafeNumber(record.confidence, 0.45),
+        normalizeIsoTimestamp(record.publishedAt || emailRecord.message_date || emailRecord.ingested_at)
+      ]
+    );
+    inserted += 1;
+  }
+
+  return { inserted };
+}
+
+async function runCompanyUpdatesDedupeForUser(userId) {
+  const dedupeWindowDays = 21;
+  const query = await executePipelineDbQuery(
+    `SELECT id, broker, company_canonical, report_type, summary, published_at, created_at
+       FROM ${companyUpdatesTable}
+      WHERE user_id = $1
+      ORDER BY COALESCE(published_at, created_at) ASC, id ASC`,
+    [userId]
+  );
+  const rows = Array.isArray(query.rows) ? query.rows : [];
+
+  await executePipelineDbQuery(
+    `UPDATE ${companyUpdatesTable}
+        SET is_duplicate = FALSE,
+            duplicate_of_update_id = NULL,
+            dedupe_reason = NULL,
+            dedupe_score = NULL,
+            updated_at = NOW()
+      WHERE user_id = $1`,
+    [userId]
+  );
+
+  const canonicalByGroup = new Map();
+  let markedDuplicates = 0;
+
+  for (const row of rows) {
+    const broker = normalizeText(row.broker).toLowerCase();
+    const company = normalizeText(row.company_canonical).toLowerCase();
+    const groupKey = `${broker}|${company}`;
+    const candidates = canonicalByGroup.get(groupKey) || [];
+    const rowEpoch = new Date(row.published_at || row.created_at || 0).getTime();
+    let duplicateOf = null;
+    let duplicateScore = 0;
+    let duplicateReason = "";
+
+    for (let index = candidates.length - 1; index >= 0; index -= 1) {
+      const candidate = candidates[index];
+      const candidateEpoch = new Date(candidate.published_at || candidate.created_at || 0).getTime();
+      const dayDistance = Math.abs(rowEpoch - candidateEpoch) / (24 * 60 * 60 * 1000);
+      if (dayDistance > dedupeWindowDays) {
+        continue;
+      }
+
+      const score = jaccardSimilarity(row.summary, candidate.summary);
+      const sameType = normalizeText(row.report_type).toLowerCase() === normalizeText(candidate.report_type).toLowerCase();
+      const isDuplicate = (sameType && score >= 0.74) || score >= 0.84;
+      if (isDuplicate) {
+        duplicateOf = candidate.id;
+        duplicateScore = score;
+        duplicateReason = sameType ? "similar_update_same_type" : "semantic_overlap";
+        break;
+      }
+    }
+
+    if (duplicateOf) {
+      markedDuplicates += 1;
+      await executePipelineDbQuery(
+        `UPDATE ${companyUpdatesTable}
+            SET is_duplicate = TRUE,
+                duplicate_of_update_id = $3,
+                dedupe_reason = $4,
+                dedupe_score = $5,
+                updated_at = NOW()
+          WHERE user_id = $1 AND id = $2`,
+        [userId, row.id, duplicateOf, duplicateReason, duplicateScore]
+      );
+      continue;
+    }
+
+    candidates.push(row);
+    canonicalByGroup.set(groupKey, candidates);
+  }
+
+  await executePipelineDbQuery(
+    `UPDATE ${ingestedEmailsTable}
+        SET dedupe_checked_at = NOW(),
+            updated_at = NOW()
+      WHERE user_id = $1`,
+    [userId]
+  );
+
+  return {
+    totalRows: rows.length,
+    markedDuplicates
+  };
+}
+
+async function runCompanyUpdatePipelineForIngestedRecords(user, ingestedRecords) {
+  const rows = Array.isArray(ingestedRecords) ? ingestedRecords.filter(Boolean) : [];
+  if (rows.length === 0) {
+    return {
+      ingestedEmails: 0,
+      aiProcessedEmails: 0,
+      aiFailedEmails: 0,
+      extractedCompanyUpdates: 0,
+      duplicatesMarked: 0,
+      source: companyUpdateExtractor.source
+    };
+  }
+
+  const companyDictionary = Array.from(
+    new Set(
+      rows
+        .map((entry) => normalizeText(entry.subject))
+        .filter(Boolean)
+    )
+  );
+
+  let aiProcessedEmails = 0;
+  let aiFailedEmails = 0;
+  let extractedCompanyUpdates = 0;
+
+  for (const emailRecord of rows) {
+    await setIngestedEmailAiStatus(user.id, emailRecord.id, "processing", null);
+    try {
+      const extraction = await companyUpdateExtractor.extractEmailToCompanies({
+        userId: user.id,
+        emailRecord: {
+          id: emailRecord.id,
+          archiveId: emailRecord.archive_id,
+          broker: emailRecord.broker,
+          sender: emailRecord.sender,
+          subject: emailRecord.subject,
+          snippet: emailRecord.snippet,
+          bodyPreview: emailRecord.body_preview,
+          messageDate: emailRecord.message_date,
+          ingestedAt: emailRecord.ingested_at,
+          attachments: Array.isArray(emailRecord.attachments) ? emailRecord.attachments : []
+        },
+        companyDictionary
+      });
+      const normalizedReports = Array.isArray(extraction?.reports)
+        ? extraction.reports.map((entry) => ({ ...entry, broker: emailRecord.broker }))
+        : [];
+      const replaceResult = await replaceCompanyUpdatesForEmail(
+        user.id,
+        emailRecord,
+        normalizedReports,
+        extraction?.source || companyUpdateExtractor.source,
+        extraction?.rawResponse || {}
+      );
+      extractedCompanyUpdates += replaceResult.inserted;
+      aiProcessedEmails += 1;
+      await setIngestedEmailAiStatus(user.id, emailRecord.id, "completed", null);
+    } catch (error) {
+      aiFailedEmails += 1;
+      await setIngestedEmailAiStatus(
+        user.id,
+        emailRecord.id,
+        "failed",
+        error instanceof Error ? error.message.slice(0, 600) : "AI extraction failed"
+      );
+    }
+  }
+
+  const dedupeSummary = await runCompanyUpdatesDedupeForUser(user.id);
+  return {
+    ingestedEmails: rows.length,
+    aiProcessedEmails,
+    aiFailedEmails,
+    extractedCompanyUpdates,
+    duplicatesMarked: dedupeSummary.markedDuplicates,
+    source: companyUpdateExtractor.source
+  };
 }
 
 function normalizeGmailPreferencesEntry(entry) {
@@ -1868,8 +2339,10 @@ async function runScheduledIngests(trigger = "scheduled") {
   let successfulRuns = 0;
   let failedRuns = 0;
   let archivedCount = 0;
-  let extractionQueuedRuns = 0;
-  let extractionFailedRuns = 0;
+  let aiProcessedEmails = 0;
+  let aiFailedEmails = 0;
+  let extractedCompanyUpdates = 0;
+  let dedupeMarkedDuplicates = 0;
 
   for (const connection of db.gmailConnections) {
     const user = getUserById(connection.userId);
@@ -1896,44 +2369,42 @@ async function runScheduledIngests(trigger = "scheduled") {
         connection,
         includeAttachments: true
       });
-      let extraction = {
-        queued: false,
-        reason: "no_archives",
-        run: null,
+      let companyPipeline = {
+        ingestedEmails: 0,
+        aiProcessedEmails: 0,
+        aiFailedEmails: 0,
+        extractedCompanyUpdates: 0,
+        duplicatesMarked: 0,
+        source: companyUpdateExtractor.source,
         error: null
       };
       try {
-        extraction = await queueExtractionFromArchiveIds(
-          user.id,
-          toArchiveIdList(ingest.items),
-          "scheduled_ingest_auto_extract"
-        );
+        const ingestedRecords = [];
+        for (const item of ingest.items) {
+          const row = await upsertIngestedEmailRecord(user, item);
+          if (row) {
+            ingestedRecords.push(row);
+          }
+        }
+        companyPipeline = await runCompanyUpdatePipelineForIngestedRecords(user, ingestedRecords);
       } catch (error) {
-        extraction = {
-          queued: false,
-          reason: "queue_failed",
-          run: null,
-          error: error instanceof Error ? error.message : "Failed to queue extraction"
-        };
+        companyPipeline.error = error instanceof Error ? error.message : "Failed to run company update pipeline";
       }
 
       prefs.lastScheduledRunDate = zoneParts.dateKey;
       successfulRuns += 1;
       archivedCount += ingest.summary.archivedCount;
-      if (extraction.queued) {
-        extractionQueuedRuns += 1;
-      } else if (extraction.error) {
-        extractionFailedRuns += 1;
-      }
+      aiProcessedEmails += Number(companyPipeline.aiProcessedEmails || 0);
+      aiFailedEmails += Number(companyPipeline.aiFailedEmails || 0);
+      extractedCompanyUpdates += Number(companyPipeline.extractedCompanyUpdates || 0);
+      dedupeMarkedDuplicates += Number(companyPipeline.duplicatesMarked || 0);
       details.push({
         userId: user.id,
         email: user.email,
         status: "ok",
         archivedCount: ingest.summary.archivedCount,
         fetchedMessages: ingest.summary.fetchedMessages,
-        extractionQueued: extraction.queued,
-        extractionRunId: extraction.run?.id ?? null,
-        extractionError: extraction.error
+        companyUpdatePipeline: companyPipeline
       });
     } catch (error) {
       failedRuns += 1;
@@ -1954,8 +2425,10 @@ async function runScheduledIngests(trigger = "scheduled") {
     successfulRuns,
     failedRuns,
     archivedCount,
-    extractionQueuedRuns,
-    extractionFailedRuns,
+    aiProcessedEmails,
+    aiFailedEmails,
+    extractedCompanyUpdates,
+    dedupeMarkedDuplicates,
     details
   };
 }
@@ -1982,25 +2455,26 @@ async function handleGmailIngest(req, res, auth) {
     ingestToDate: body.ingestToDate
   });
 
-  let extraction = {
-    queued: false,
-    reason: "no_archives",
-    run: null,
+  let companyUpdatePipeline = {
+    ingestedEmails: 0,
+    aiProcessedEmails: 0,
+    aiFailedEmails: 0,
+    extractedCompanyUpdates: 0,
+    duplicatesMarked: 0,
+    source: companyUpdateExtractor.source,
     error: null
   };
   try {
-    extraction = await queueExtractionFromArchiveIds(
-      auth.user.id,
-      toArchiveIdList(ingest.items),
-      "manual_ingest_auto_extract"
-    );
+    const ingestedRecords = [];
+    for (const item of ingest.items) {
+      const row = await upsertIngestedEmailRecord(auth.user, item);
+      if (row) {
+        ingestedRecords.push(row);
+      }
+    }
+    companyUpdatePipeline = await runCompanyUpdatePipelineForIngestedRecords(auth.user, ingestedRecords);
   } catch (error) {
-    extraction = {
-      queued: false,
-      reason: "queue_failed",
-      run: null,
-      error: error instanceof Error ? error.message : "Failed to queue extraction"
-    };
+    companyUpdatePipeline.error = error instanceof Error ? error.message : "Failed to run company update pipeline";
   }
 
   await persistDb();
@@ -2009,7 +2483,13 @@ async function handleGmailIngest(req, res, auth) {
     ok: true,
     summary: ingest.summary,
     items: ingest.items,
-    extraction
+    extraction: {
+      queued: false,
+      reason: "db_first_pipeline_active",
+      run: null,
+      error: null
+    },
+    companyUpdatePipeline
   });
 }
 
@@ -2052,11 +2532,48 @@ async function handleResetPipelineData(req, res, auth) {
   let removedArchives = 0;
   let removedExtractedReports = 0;
   let removedExtractionRuns = 0;
+  let removedIngestedEmails = 0;
+  let removedCompanyUpdates = 0;
 
   if (clearArchives) {
     const before = db.emailArchives.length;
     db.emailArchives = db.emailArchives.filter((entry) => entry.userId !== auth.user.id);
     removedArchives = before - db.emailArchives.length;
+  }
+
+  if (isDatabaseEnabled() && (clearArchives || clearExtraction)) {
+    if (clearArchives) {
+      const ingestedCountResult = await executePipelineDbQuery(
+        `SELECT COUNT(*)::int AS total FROM ${ingestedEmailsTable} WHERE user_id = $1`,
+        [auth.user.id]
+      );
+      const updatesCountResult = await executePipelineDbQuery(
+        `SELECT COUNT(*)::int AS total FROM ${companyUpdatesTable} WHERE user_id = $1`,
+        [auth.user.id]
+      );
+
+      removedIngestedEmails = Number(ingestedCountResult.rows?.[0]?.total ?? 0);
+      removedCompanyUpdates = Number(updatesCountResult.rows?.[0]?.total ?? 0);
+
+      await executePipelineDbQuery(`DELETE FROM ${ingestedEmailsTable} WHERE user_id = $1`, [auth.user.id]);
+    } else if (clearExtraction) {
+      const updatesCountResult = await executePipelineDbQuery(
+        `SELECT COUNT(*)::int AS total FROM ${companyUpdatesTable} WHERE user_id = $1`,
+        [auth.user.id]
+      );
+      removedCompanyUpdates = Number(updatesCountResult.rows?.[0]?.total ?? 0);
+      await executePipelineDbQuery(`DELETE FROM ${companyUpdatesTable} WHERE user_id = $1`, [auth.user.id]);
+      await executePipelineDbQuery(
+        `UPDATE ${ingestedEmailsTable}
+            SET ai_status = 'pending',
+                ai_error = NULL,
+                ai_extracted_at = NULL,
+                dedupe_checked_at = NULL,
+                updated_at = NOW()
+          WHERE user_id = $1`,
+        [auth.user.id]
+      );
+    }
   }
 
   if (clearExtraction) {
@@ -2087,7 +2604,9 @@ async function handleResetPipelineData(req, res, auth) {
     forcedAbortCount,
     removedArchives,
     removedExtractedReports,
-    removedExtractionRuns
+    removedExtractionRuns,
+    removedIngestedEmails,
+    removedCompanyUpdates
   });
 }
 
@@ -2434,6 +2953,133 @@ async function handleListExtractedReports(req, res, auth, requestUrl) {
   sendJson(req, res, 200, payload);
 }
 
+async function handleListCompanyUpdates(req, res, auth, requestUrl) {
+  if (!isDatabaseEnabled()) {
+    sendJson(req, res, 503, { error: "Postgres is required for DB-first company updates." });
+    return;
+  }
+
+  const { limit, offset } = parsePaginationParams(requestUrl, 100);
+  const includeDuplicatesRaw = String(requestUrl.searchParams.get("includeDuplicates") || "").trim().toLowerCase();
+  const includeDuplicates = includeDuplicatesRaw === "true" || includeDuplicatesRaw === "1" || includeDuplicatesRaw === "yes";
+  const brokerFilter = normalizeText(requestUrl.searchParams.get("broker"));
+  const companyFilter = normalizeText(requestUrl.searchParams.get("company"));
+  const reportTypeRaw = normalizeText(requestUrl.searchParams.get("reportType"));
+  const reportTypeFilter = reportTypeRaw && reportTypeRaw.toLowerCase() !== "all" ? normalizeReportTypeLabel(reportTypeRaw) : "";
+  const query = normalizeText(requestUrl.searchParams.get("q"));
+
+  const whereClauses = ["cu.user_id = $1"];
+  const values = [auth.user.id];
+  let valueIndex = values.length;
+
+  if (!includeDuplicates) {
+    whereClauses.push("cu.is_duplicate = FALSE");
+  }
+  if (brokerFilter) {
+    valueIndex += 1;
+    whereClauses.push(`cu.broker = $${valueIndex}`);
+    values.push(brokerFilter);
+  }
+  if (companyFilter) {
+    valueIndex += 1;
+    whereClauses.push(`cu.company_canonical ILIKE $${valueIndex}`);
+    values.push(`%${companyFilter}%`);
+  }
+  if (reportTypeFilter) {
+    valueIndex += 1;
+    whereClauses.push(`cu.report_type = $${valueIndex}`);
+    values.push(reportTypeFilter);
+  }
+  if (query) {
+    valueIndex += 1;
+    whereClauses.push(`(
+      cu.company_canonical ILIKE $${valueIndex}
+      OR cu.broker ILIKE $${valueIndex}
+      OR cu.summary ILIKE $${valueIndex}
+      OR cu.decision ILIKE $${valueIndex}
+    )`);
+    values.push(`%${query}%`);
+  }
+
+  const whereSql = whereClauses.join(" AND ");
+
+  const totalQuery = await executePipelineDbQuery(
+    `SELECT COUNT(*)::int AS total
+       FROM ${companyUpdatesTable} cu
+      WHERE ${whereSql}`,
+    values
+  );
+  const total = Number(totalQuery.rows?.[0]?.total ?? 0);
+
+  const pageValues = [...values, limit, offset];
+  const pageLimitIndex = values.length + 1;
+  const pageOffsetIndex = values.length + 2;
+  const rowsQuery = await executePipelineDbQuery(
+    `SELECT
+       cu.id,
+       cu.email_record_id,
+       COALESCE(cu.published_at, cu.created_at) AS event_date,
+       cu.company_canonical,
+       cu.broker,
+       cu.report_type,
+       cu.summary,
+       cu.decision,
+       cu.is_duplicate,
+       cu.duplicate_of_update_id,
+       cu.archive_id AS update_archive_id,
+       ie.archive_id AS email_archive_id,
+       ie.subject AS email_subject,
+       ie.attachments AS email_attachments,
+       COALESCE(ie.raw_payload->>'gmailMessageUrl', '') AS gmail_message_url
+     FROM ${companyUpdatesTable} cu
+     LEFT JOIN ${ingestedEmailsTable} ie
+       ON ie.id = cu.email_record_id
+      AND ie.user_id = cu.user_id
+     WHERE ${whereSql}
+     ORDER BY COALESCE(cu.published_at, cu.created_at) DESC, cu.id DESC
+     LIMIT $${pageLimitIndex}
+     OFFSET $${pageOffsetIndex}`,
+    pageValues
+  );
+
+  const items = (rowsQuery.rows || []).map((row) => {
+    const archiveId = normalizeText(row.update_archive_id || row.email_archive_id);
+    const attachmentList = Array.isArray(row.email_attachments) ? row.email_attachments : [];
+    const firstAttachmentPath =
+      archiveId && attachmentList.length > 0
+        ? `/api/email-archives/${encodeURIComponent(archiveId)}/attachments/0`
+        : null;
+
+    return {
+      id: String(row.id),
+      emailRecordId: String(row.email_record_id),
+      date: row.event_date ? new Date(row.event_date).toISOString() : null,
+      company: row.company_canonical || "Unknown Company",
+      brokerage: row.broker || "Unmapped Broker",
+      reportType: row.report_type || "Other",
+      summary: row.summary || "",
+      decision: normalizeDecisionLabel(row.decision),
+      isDuplicate: row.is_duplicate === true,
+      duplicateOfUpdateId: row.duplicate_of_update_id ? String(row.duplicate_of_update_id) : null,
+      sourceEmailSubject: normalizeText(row.email_subject),
+      archiveId: archiveId || null,
+      sourceLinks: {
+        archive: archiveId ? `/api/email-archives/${encodeURIComponent(archiveId)}/raw` : null,
+        attachment: firstAttachmentPath,
+        gmail: normalizeText(row.gmail_message_url) || null
+      }
+    };
+  });
+
+  sendJson(req, res, 200, {
+    total,
+    limit,
+    offset,
+    includeDuplicates,
+    items
+  });
+}
+
 async function handleDigestPreview(req, res, auth, requestUrl) {
   const preview = buildDigestPreviewForUser(auth.user.id, {
     limit: requestUrl.searchParams.get("limit"),
@@ -2744,6 +3390,7 @@ const server = createServer(async (req, res) => {
           "GET /api/extraction/runs/:runId/status",
           "POST /api/extraction/runs/:runId/abort",
           "GET /api/extracted-reports",
+          "GET /api/company-updates",
           "GET /api/digest/preview",
           "POST /api/digest/send"
         ]
@@ -2938,6 +3585,18 @@ const server = createServer(async (req, res) => {
 
       if (method === "GET") {
         await handleListExtractedReports(req, res, auth, requestUrl);
+        return;
+      }
+    }
+
+    if (pathName === "/api/company-updates") {
+      const auth = requireAuth(req, res);
+      if (!auth) {
+        return;
+      }
+
+      if (method === "GET") {
+        await handleListCompanyUpdates(req, res, auth, requestUrl);
         return;
       }
     }

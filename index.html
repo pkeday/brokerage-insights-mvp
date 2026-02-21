@@ -105,13 +105,35 @@
               <input id="filter-duplicates" type="checkbox" />
               Include duplicate snippets
             </label>
+            <button id="refresh-company-updates-btn" class="btn" type="button">Refresh table</button>
           </div>
 
           <div class="chip-row" id="control-chip-row"></div>
 
           <div class="kpi-grid" id="kpi-grid"></div>
 
-          <div class="broker-lanes" id="broker-lanes"></div>
+          <div id="dashboard-updates-meta" class="note"></div>
+
+          <div class="panel">
+            <header>Company Updates (DB)</header>
+            <div class="panel-body">
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Company</th>
+                      <th>Brokerage</th>
+                      <th>Report Type</th>
+                      <th>Summary</th>
+                      <th>Decision</th>
+                    </tr>
+                  </thead>
+                  <tbody id="broker-lanes"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
 
           <details class="extraction-workspace extraction-workspace-advanced">
             <summary>Advanced extraction diagnostics (optional)</summary>
@@ -472,6 +494,6 @@
       </section>
     </div>
 
-    <script src="./app.js?v=20260221-2045" type="module"></script>
+    <script src="./app.js?v=20260221-2205" type="module"></script>
   </body>
 </html>
