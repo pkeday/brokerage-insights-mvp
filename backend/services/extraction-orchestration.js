@@ -308,7 +308,7 @@ export async function createExtractionOrchestrator(options) {
 
   async function runExtraction(runId) {
     const db = withDb();
-    const run = db.extractionRuns.find((entry) => entry.id === runId);
+    let run = db.extractionRuns.find((entry) => entry.id === runId);
     if (!run) {
       return;
     }
@@ -336,6 +336,12 @@ export async function createExtractionOrchestrator(options) {
       );
 
       for (const archiveId of run.archiveIds) {
+        const liveRun = db.extractionRuns.find((entry) => entry.id === run.id && entry.userId === run.userId);
+        if (!liveRun) {
+          return;
+        }
+        run = liveRun;
+
         if (run.abortRequestedAt) {
           markRunAborted(run, nowIso(), run.abortReason || "Aborted by user");
           await persistState();
@@ -416,6 +422,11 @@ export async function createExtractionOrchestrator(options) {
             run.stats.extractedReports += 1;
             await persistState();
             continue;
+          }
+
+          const runStillPresent = db.extractionRuns.some((entry) => entry.id === run.id && entry.userId === run.userId);
+          if (!runStillPresent) {
+            return;
           }
 
           if (existingCanonical || semanticDuplicate) {

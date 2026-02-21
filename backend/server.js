@@ -2032,6 +2032,20 @@ async function handleResetPipelineData(req, res, auth) {
     return;
   }
 
+  let forcedAbortCount = 0;
+  if (activeRuns.length > 0 && force) {
+    for (const run of activeRuns) {
+      const result = await extractionOrchestrator.abortRun({
+        userId: auth.user.id,
+        runId: run.id,
+        reason: "Forced reset requested by user"
+      });
+      if (result?.accepted) {
+        forcedAbortCount += 1;
+      }
+    }
+  }
+
   let removedArchives = 0;
   let removedExtractedReports = 0;
   let removedExtractionRuns = 0;
@@ -2066,6 +2080,8 @@ async function handleResetPipelineData(req, res, auth) {
     clearArchives,
     clearExtraction,
     resetCursor,
+    force,
+    forcedAbortCount,
     removedArchives,
     removedExtractedReports,
     removedExtractionRuns

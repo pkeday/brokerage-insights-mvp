@@ -2534,14 +2534,37 @@ async function resetPipelineDataForCurrentUser() {
   renderIngestSetupModal();
 
   try {
-    const payload = await apiFetch("/api/pipeline/reset", {
-      method: "POST",
-      body: JSON.stringify({
-        clearArchives: true,
-        clearExtraction: true,
-        resetCursor: true
-      })
-    });
+    const executeReset = async (force = false) =>
+      apiFetch("/api/pipeline/reset", {
+        method: "POST",
+        body: JSON.stringify({
+          clearArchives: true,
+          clearExtraction: true,
+          resetCursor: true,
+          force
+        })
+      });
+
+    let payload;
+    try {
+      payload = await executeReset(false);
+    } catch (error) {
+      const status = Number(error?.status || 0);
+      if (status !== 409) {
+        throw error;
+      }
+
+      const forceConfirm = window.confirm(
+        "An extraction run is still active. Force reset will abort active runs and clear data now. Continue?"
+      );
+      if (!forceConfirm) {
+        state.ingestSetup.statusMessage = "Reset cancelled. Abort active run first, then retry.";
+        renderIngestSetupModal();
+        return;
+      }
+
+      payload = await executeReset(true);
+    }
 
     state.archives.items = [];
     state.archives.total = 0;
@@ -2559,8 +2582,11 @@ async function resetPipelineDataForCurrentUser() {
 
     await Promise.allSettled([fetchArchives(), refreshExtractionWorkspace()]);
 
+    const forcedAbortText = payload.force && Number(payload.forcedAbortCount || 0) > 0
+      ? ` Aborted ${payload.forcedAbortCount} active run(s) as part of force reset.`
+      : "";
     setPipelineMessage(
-      `Reset complete: removed ${payload.removedArchives || 0} archives, ${payload.removedExtractedReports || 0} extracted reports, ${payload.removedExtractionRuns || 0} extraction runs.`
+      `Reset complete: removed ${payload.removedArchives || 0} archives, ${payload.removedExtractedReports || 0} extracted reports, ${payload.removedExtractionRuns || 0} extraction runs.${forcedAbortText}`
     );
     state.ingestSetup.statusMessage = "Reset complete. Configure labels/date range, then run ingest.";
     renderAllDataViews();
