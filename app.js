@@ -231,7 +231,7 @@ const state = {
     scheduleTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Kolkata",
     dateFrom: "",
     dateTo: "",
-    startFromNow: true,
+    startFromNow: false,
     resetCursor: false,
     statusMessage: ""
   },
@@ -622,9 +622,11 @@ function bindEvents() {
       const companyPipelineError = String(companyPipeline.error || "").trim();
       const cursorAfter = Number(summary.cursorAfterEpoch || 0);
       const cursorLabel = cursorAfter > 0 ? new Date(cursorAfter * 1000).toLocaleString() : "not set";
+      const queryUsed = String(summary.queryUsed || "").trim();
+      const trackedLabelsCount = Number(Array.isArray(summary.trackedLabels) ? summary.trackedLabels.length : 0);
       if (fetchedCount === 0) {
         setPipelineMessage(
-          `Ingest complete: fetched 0 messages. Cursor is ${cursorLabel}. If you expected older emails, open Ingest setup and check "Backfill older emails (reset cursor to oldest)".`
+          `Ingest complete: fetched 0 messages. Cursor is ${cursorLabel}. Tracking ${trackedLabelsCount} label(s).${queryUsed ? ` Query: ${queryUsed}.` : ""} If you expected older emails, open Ingest setup and check "Backfill older emails (reset cursor to oldest)".`
         );
       } else {
         setPipelineMessage(
@@ -2500,6 +2502,9 @@ async function loadIngestSetupData(fetchLabels = true) {
   );
   state.ingestSetup.dateFrom = normalizeDateInput(prefs.ingestFromDate);
   state.ingestSetup.dateTo = normalizeDateInput(prefs.ingestToDate);
+  // Cursor actions are one-time controls; keep them opt-in each time modal opens.
+  state.ingestSetup.startFromNow = false;
+  state.ingestSetup.resetCursor = false;
   state.ingestSetup.statusMessage = `Loaded ${labels.length} labels. ${trackedIds.length} currently tracked.`;
 }
 
@@ -2648,6 +2653,10 @@ async function saveIngestSetup() {
         resetCursor
       })
     });
+
+    // Prevent accidental repeat cursor resets on future setup saves.
+    state.ingestSetup.startFromNow = false;
+    state.ingestSetup.resetCursor = false;
 
     state.ingestSetup.statusMessage = "Ingest setup saved.";
     const dateFilterPart =
