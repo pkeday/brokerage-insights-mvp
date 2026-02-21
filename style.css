@@ -520,7 +520,7 @@ input[type="checkbox"] {
 
 .extraction-filters {
   display: grid;
-  grid-template-columns: minmax(150px, 1fr) minmax(220px, 1.3fr) minmax(160px, 1fr) auto;
+  grid-template-columns: minmax(150px, 1fr) minmax(220px, 1.3fr) minmax(160px, 1fr) minmax(150px, auto) auto;
   gap: 8px;
   margin-bottom: 8px;
   align-items: end;
@@ -538,6 +538,18 @@ input[type="checkbox"] {
 .extraction-filters label input,
 .extraction-filters label select {
   margin-top: 4px;
+}
+
+.extraction-filters .inline-check-compact {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.extraction-filters .inline-check-compact input {
+  margin-top: 0;
 }
 
 .tag.extraction-status {
@@ -566,11 +578,17 @@ input[type="checkbox"] {
   color: #7a352b;
 }
 
-#extracted-reports-table td:nth-child(6) {
+#extracted-reports-table td:nth-child(7) {
   min-width: 320px;
   max-width: 520px;
   white-space: normal;
   word-break: break-word;
+}
+
+.dedupe-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #5f776f;
 }
 
 .lane {

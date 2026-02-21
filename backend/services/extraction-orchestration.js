@@ -1,4 +1,5 @@
 import { createExtractionAdapter } from "./extraction-adapter.js";
+import { redactPiiText } from "../extraction/pii-redaction.js";
 
 const RUN_STATUS = {
   QUEUED: "queued",
@@ -9,6 +10,28 @@ const RUN_STATUS = {
 
 const ALLOWED_RUN_STATUSES = new Set(Object.values(RUN_STATUS));
 const MAX_FAILURE_SAMPLES = 25;
+const SIMILARITY_STOP_WORDS = new Set([
+  "the",
+  "and",
+  "for",
+  "with",
+  "from",
+  "that",
+  "this",
+  "have",
+  "has",
+  "was",
+  "were",
+  "into",
+  "over",
+  "under",
+  "after",
+  "before",
+  "update",
+  "report",
+  "broker",
+  "note"
+]);
 
 function normalizeText(value) {
   return String(value ?? "").replace(/\s+/g, " ").trim();
@@ -40,6 +63,39 @@ function normalizeKey(value) {
     .replace(/&/g, " and ")
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
+}
+
+function toEpoch(value) {
+  const parsed = new Date(String(value ?? "")).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function toSimilarityTokens(value) {
+  return normalizeText(value)
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9 ]+/g, " ")
+    .split(/\s+/)
+    .filter((token) => token.length >= 3 && !SIMILARITY_STOP_WORDS.has(token));
+}
+
+function jaccardSimilarity(leftText, rightText) {
+  const leftSet = new Set(toSimilarityTokens(leftText));
+  const rightSet = new Set(toSimilarityTokens(rightText));
+
+  if (leftSet.size === 0 || rightSet.size === 0) {
+    return 0;
+  }
+
+  let intersection = 0;
+  for (const token of leftSet) {
+    if (rightSet.has(token)) {
+      intersection += 1;
+    }
+  }
+
+  const union = leftSet.size + rightSet.size - intersection;
+  return union <= 0 ? 0 : intersection / union;
 }
 
 function buildDuplicateKey(report) {
@@ -99,6 +155,12 @@ function makeRunPublic(run) {
 }
 
 function makeReportPublic(report) {
+  const redactedTitle = redactPiiText(report.title);
+  const redactedSummary = redactPiiText(report.summary);
+  const redactedKeyPoints = Array.isArray(report.keyPoints)
+    ? report.keyPoints.map((entry) => redactPiiText(entry)).filter(Boolean)
+    : [];
+
   return {
     id: report.id,
     runId: report.runId,
@@ -108,13 +170,14 @@ function makeReportPublic(report) {
     companyCanonical: report.companyCanonical,
     companyRaw: report.companyRaw,
     reportType: report.reportType,
-    title: report.title,
-    summary: report.summary,
-    keyPoints: report.keyPoints,
+    title: redactedTitle,
+    summary: redactedSummary,
+    keyPoints: redactedKeyPoints,
     publishedAt: report.publishedAt,
     confidence: report.confidence,
     duplicateKey: report.duplicateKey,
     duplicateOfReportId: report.duplicateOfReportId ?? null,
+    dedupeMethod: report.dedupeMethod ?? null,
     createdAt: report.createdAt
   };
 }
@@ -126,13 +189,15 @@ function normalizeReportPayload(raw, context) {
     archiveId: context.archive.id,
     userId: context.userId,
     broker: normalizeText(raw.broker) || "Unmapped Broker",
-    companyCanonical: normalizeText(raw.companyCanonical) || "unknown-company",
+    companyCanonical: normalizeText(raw.companyCanonical) || "Unknown Company",
     companyRaw: normalizeText(raw.companyRaw) || "Unknown Company",
     reportType: normalizeText(raw.reportType) || "broker_note",
-    title: normalizeText(raw.title) || normalizeText(context.archive.subject) || "Untitled brokerage report",
-    summary: normalizeText(raw.summary) || "No summary available.",
+    title: redactPiiText(
+      normalizeText(raw.title) || normalizeText(context.archive.subject) || "Untitled brokerage report"
+    ),
+    summary: redactPiiText(normalizeText(raw.summary) || "No summary available."),
     keyPoints: Array.isArray(raw.keyPoints)
-      ? raw.keyPoints.map((entry) => normalizeText(entry)).filter(Boolean).slice(0, 10)
+      ? raw.keyPoints.map((entry) => redactPiiText(normalizeText(entry))).filter(Boolean).slice(0, 10)
       : [],
     publishedAt: toIsoDate(raw.publishedAt) || toIsoDate(context.archive.dateHeader) || context.nowIso,
     confidence: (() => {
@@ -144,6 +209,7 @@ function normalizeReportPayload(raw, context) {
     })(),
     duplicateKey: "",
     duplicateOfReportId: null,
+    dedupeMethod: null,
     createdAt: context.nowIso,
     updatedAt: context.nowIso
   };
@@ -151,6 +217,44 @@ function normalizeReportPayload(raw, context) {
   normalized.duplicateKey = normalizeText(raw.duplicateKey) || buildDuplicateKey(normalized);
 
   return normalized;
+}
+
+function findSemanticDuplicate(existingReports, report) {
+  const reportPublishedAt = toEpoch(report.publishedAt);
+
+  for (const existing of existingReports) {
+    if (!existing || existing.duplicateOfReportId) {
+      continue;
+    }
+
+    if (normalizeKey(existing.userId) !== normalizeKey(report.userId)) {
+      continue;
+    }
+    if (normalizeKey(existing.broker) !== normalizeKey(report.broker)) {
+      continue;
+    }
+    if (normalizeKey(existing.companyCanonical) !== normalizeKey(report.companyCanonical)) {
+      continue;
+    }
+
+    const existingPublishedAt = toEpoch(existing.publishedAt);
+    const dayDistance = Math.abs(reportPublishedAt - existingPublishedAt) / (24 * 60 * 60 * 1000);
+    if (dayDistance > 21) {
+      continue;
+    }
+
+    const summaryScore = jaccardSimilarity(existing.summary, report.summary);
+    const titleScore = jaccardSimilarity(existing.title, report.title);
+
+    if (summaryScore >= 0.78) {
+      return existing;
+    }
+    if (summaryScore >= 0.62 && titleScore >= 0.55) {
+      return existing;
+    }
+  }
+
+  return null;
 }
 
 export async function createExtractionOrchestrator(options) {
@@ -254,8 +358,16 @@ export async function createExtractionOrchestrator(options) {
               entry.duplicateKey === report.duplicateKey &&
               !entry.duplicateOfReportId
           );
-          if (existingCanonical) {
-            report.duplicateOfReportId = existingCanonical.id;
+
+          const semanticDuplicate = existingCanonical
+            ? null
+            : findSemanticDuplicate(db.extractedReports, report);
+
+          if (existingCanonical || semanticDuplicate) {
+            const canonical = existingCanonical ?? semanticDuplicate;
+            report.duplicateOfReportId = canonical.id;
+            report.duplicateKey = canonical.duplicateKey || report.duplicateKey;
+            report.dedupeMethod = existingCanonical ? "exact_key" : "semantic_overlap";
             run.stats.duplicateReports += 1;
           }
 

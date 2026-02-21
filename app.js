@@ -297,7 +297,8 @@ const state = {
     filters: {
       broker: "All",
       company: "",
-      reportType: "All"
+      reportType: "All",
+      includeDuplicates: false
     }
   },
   priorityCompanies: loadList(STORAGE_KEYS.priority, ["Reliance Industries", "UltraTech Cement", "ICICI Bank"]),
@@ -370,6 +371,7 @@ const refs = {
   extractedFilterBroker: document.getElementById("extracted-filter-broker"),
   extractedFilterCompany: document.getElementById("extracted-filter-company"),
   extractedFilterType: document.getElementById("extracted-filter-type"),
+  extractedFilterIncludeDuplicates: document.getElementById("extracted-filter-include-duplicates"),
   refreshExtractedBtn: document.getElementById("refresh-extracted-btn"),
   extractedReportsMeta: document.getElementById("extracted-reports-meta"),
   extractedReportsTable: document.getElementById("extracted-reports-table"),
@@ -660,6 +662,14 @@ function bindEvents() {
   if (refs.extractedFilterType) {
     refs.extractedFilterType.addEventListener("change", (event) => {
       state.extraction.filters.reportType = event.target.value;
+      renderExtractionWorkspace();
+    });
+  }
+
+  if (refs.extractedFilterIncludeDuplicates) {
+    refs.extractedFilterIncludeDuplicates.addEventListener("change", async (event) => {
+      state.extraction.filters.includeDuplicates = event.target.checked;
+      await fetchExtractedReports();
       renderExtractionWorkspace();
     });
   }
@@ -1197,6 +1207,7 @@ function renderExtractionWorkspace() {
 
   const visibleReports = getVisibleExtractedReports();
   const fetchedAtLabel = state.extraction.fetchedAt ? new Date(state.extraction.fetchedAt).toLocaleString() : "not fetched yet";
+  const duplicateVisibleCount = visibleReports.filter((report) => report.duplicateOfReportId).length;
 
   if (reportsUnavailable) {
     refs.extractedReportsMeta.className = "note warn";
@@ -1206,23 +1217,23 @@ function renderExtractionWorkspace() {
     refs.extractedReportsMeta.textContent = `Failed to load extracted reports: ${state.extraction.reportsError}`;
   } else {
     refs.extractedReportsMeta.className = "note";
-    refs.extractedReportsMeta.textContent = `${visibleReports.length} visible extracted reports (${state.extraction.reportsTotal} total loaded). Last fetch: ${fetchedAtLabel}.`;
+    refs.extractedReportsMeta.textContent = `${visibleReports.length} visible extracted reports (${state.extraction.reportsTotal} loaded, ${duplicateVisibleCount} duplicates shown). Last fetch: ${fetchedAtLabel}.`;
   }
 
   if (state.extraction.reportsLoading && state.extraction.reports.length === 0) {
     refs.extractedReportsTable.innerHTML =
-      '<tr><td colspan="8"><div class="empty-state">Loading extracted reports...</div></td></tr>';
+      '<tr><td colspan="9"><div class="empty-state">Loading extracted reports...</div></td></tr>';
     return;
   }
 
   if (reportsUnavailable) {
     refs.extractedReportsTable.innerHTML =
-      '<tr><td colspan="8"><div class="empty-state">Extracted reports will appear here once extraction endpoints are available.</div></td></tr>';
+      '<tr><td colspan="9"><div class="empty-state">Extracted reports will appear here once extraction endpoints are available.</div></td></tr>';
     return;
   }
 
   if (state.extraction.reportsError) {
-    refs.extractedReportsTable.innerHTML = `<tr><td colspan="8"><div class="empty-state">Failed to load extracted reports: ${escapeHtml(
+    refs.extractedReportsTable.innerHTML = `<tr><td colspan="9"><div class="empty-state">Failed to load extracted reports: ${escapeHtml(
       state.extraction.reportsError
     )}</div></td></tr>`;
     return;
@@ -1230,13 +1241,13 @@ function renderExtractionWorkspace() {
 
   if (state.extraction.reports.length === 0) {
     refs.extractedReportsTable.innerHTML =
-      '<tr><td colspan="8"><div class="empty-state">No extracted reports yet. Run extraction to generate report records.</div></td></tr>';
+      '<tr><td colspan="9"><div class="empty-state">No extracted reports yet. Run extraction to generate report records.</div></td></tr>';
     return;
   }
 
   if (visibleReports.length === 0) {
     refs.extractedReportsTable.innerHTML =
-      '<tr><td colspan="8"><div class="empty-state">No extracted reports match the selected filters.</div></td></tr>';
+      '<tr><td colspan="9"><div class="empty-state">No extracted reports match the selected filters.</div></td></tr>';
     return;
   }
 
@@ -1244,6 +1255,14 @@ function renderExtractionWorkspace() {
     .map((report) => {
       const confidenceText = report.confidence === null ? "-" : `${Math.round(report.confidence)}%`;
       const sourceLink = buildExtractedSourceLink(report);
+      const dedupeLabel = report.duplicateOfReportId ? "Duplicate" : "Canonical";
+      const dedupeClass = report.duplicateOfReportId ? "warn" : "ok";
+      const dedupeDetail = report.duplicateOfReportId
+        ? `of ${report.duplicateOfReportId}${report.dedupeMethod ? ` (${report.dedupeMethod})` : ""}`
+        : report.duplicateKey
+          ? report.duplicateKey.slice(0, 16)
+          : "primary";
+      const summaryWithPoints = [report.summary, ...report.keyPoints.slice(0, 2)].filter(Boolean).join(" | ");
 
       return `
         <tr>
@@ -1251,8 +1270,12 @@ function renderExtractionWorkspace() {
           <td>${escapeHtml(report.broker)}</td>
           <td>${escapeHtml(report.companyCanonical)}</td>
           <td>${escapeHtml(report.reportType)}</td>
+          <td>
+            <span class="tag ${escapeAttribute(dedupeClass)}">${escapeHtml(dedupeLabel)}</span>
+            <div class="dedupe-hint">${escapeHtml(dedupeDetail)}</div>
+          </td>
           <td>${escapeHtml(report.title)}</td>
-          <td>${escapeHtml(report.summary)}</td>
+          <td>${escapeHtml(summaryWithPoints)}</td>
           <td>${escapeHtml(confidenceText)}</td>
           <td>${sourceLink}</td>
         </tr>
@@ -1262,7 +1285,12 @@ function renderExtractionWorkspace() {
 }
 
 function hydrateExtractedReportFilters() {
-  if (!refs.extractedFilterBroker || !refs.extractedFilterType || !refs.extractedFilterCompany) {
+  if (
+    !refs.extractedFilterBroker ||
+    !refs.extractedFilterType ||
+    !refs.extractedFilterCompany ||
+    !refs.extractedFilterIncludeDuplicates
+  ) {
     return;
   }
 
@@ -1289,6 +1317,8 @@ function hydrateExtractedReportFilters() {
   if (refs.extractedFilterCompany.value !== state.extraction.filters.company) {
     refs.extractedFilterCompany.value = state.extraction.filters.company;
   }
+
+  refs.extractedFilterIncludeDuplicates.checked = state.extraction.filters.includeDuplicates === true;
 }
 
 function getVisibleExtractedReports() {
@@ -2496,7 +2526,11 @@ async function fetchExtractedReports(options = {}) {
   renderExtractionWorkspace();
 
   try {
-    const result = await callExtractionEndpoint("reports", {}, { limit: 250, offset: 0 });
+    const result = await callExtractionEndpoint("reports", {}, {
+      limit: 250,
+      offset: 0,
+      includeDuplicates: state.extraction.filters.includeDuplicates ? "true" : "false"
+    });
     if (!result.ok) {
       if (result.unauthorized) {
         state.extraction.reports = [];
@@ -2681,6 +2715,7 @@ function normalizeExtractionRun(entry) {
     return null;
   }
 
+  const stats = entry.stats && typeof entry.stats === "object" ? entry.stats : {};
   const startedAt = normalizeDateTimeValue(
     pickFirstValue(entry, [
       "startedAt",
@@ -2704,7 +2739,7 @@ function normalizeExtractionRun(entry) {
     "total_processed",
     "sourceCount",
     "source_count"
-  ]);
+  ], pickFirstNumber(stats, ["processedArchives", "processed_archives", "archivesProcessed", "archives_processed"], 0));
   const extractedCount = pickFirstNumber(entry, [
     "extractedCount",
     "extracted_count",
@@ -2714,7 +2749,7 @@ function normalizeExtractionRun(entry) {
     "inserted_count",
     "createdCount",
     "created_count"
-  ]);
+  ], pickFirstNumber(stats, ["extractedReports", "extracted_reports", "reportsExtracted", "reports_extracted"], 0));
   const duplicatesCount = pickFirstNumber(entry, [
     "duplicatesCount",
     "duplicates_count",
@@ -2722,7 +2757,7 @@ function normalizeExtractionRun(entry) {
     "duplicate_count",
     "dedupedCount",
     "deduped_count"
-  ]);
+  ], pickFirstNumber(stats, ["duplicateReports", "duplicate_reports", "duplicates", "deduped"], 0));
 
   return {
     id: String(pickFirstValue(entry, ["id", "runId", "run_id", "jobId", "job_id"], "") || "").trim(),
@@ -2771,6 +2806,10 @@ function normalizeExtractedReport(entry) {
     publishedAt,
     confidence: normalizeConfidence(pickFirstValue(entry, ["confidence", "score", "probability"], null)),
     duplicateKey: String(pickFirstValue(entry, ["duplicateKey", "duplicate_key", "dedupeKey", "dedupe_key"], "")).trim(),
+    duplicateOfReportId: String(
+      pickFirstValue(entry, ["duplicateOfReportId", "duplicate_of_report_id", "duplicateOfId", "duplicate_of_id"], "")
+    ).trim(),
+    dedupeMethod: String(pickFirstValue(entry, ["dedupeMethod", "dedupe_method"], "")).trim(),
     sourceUrl: /^https?:\/\//i.test(sourceUrlRaw) ? sourceUrlRaw : "",
     publishedAtEpoch: parseDateValue(publishedAt)?.getTime() || 0
   };

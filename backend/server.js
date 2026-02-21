@@ -13,6 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { createExtractionOrchestrator } from "./services/extraction-orchestration.js";
+import { redactPiiText } from "./extraction/pii-redaction.js";
 
 const port = Number.parseInt(process.env.PORT ?? "10001", 10);
 const appName = process.env.APP_NAME ?? "brokerage-insights-mvp-api";
@@ -1158,13 +1159,19 @@ function sanitizeFileName(value) {
 }
 
 function makeArchivePublicRecord(record) {
+  const sender = parseFromHeader(record.from);
+  const redactionOptions = {
+    senderName: sender.name,
+    senderEmail: sender.email
+  };
+
   return {
     id: record.id,
     broker: record.broker,
-    from: record.from,
-    subject: record.subject,
-    snippet: record.snippet,
-    bodyPreview: record.bodyPreview,
+    from: redactPiiText(record.from, redactionOptions),
+    subject: redactPiiText(record.subject, redactionOptions),
+    snippet: redactPiiText(record.snippet, redactionOptions),
+    bodyPreview: redactPiiText(record.bodyPreview, redactionOptions),
     dateHeader: record.dateHeader,
     ingestedAt: record.ingestedAt,
     gmailMessageId: record.gmailMessageId,

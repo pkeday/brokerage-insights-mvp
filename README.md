@@ -43,6 +43,9 @@ python3 -m http.server 5173
 - `DATABASE_MAX_CONNECTIONS=5`
 - `BROKERAGE_DB_TABLE=brokerage_insights_mvp_state`
 - `BROKERAGE_DB_STATE_ID=primary`
+- `OPENAI_API_KEY=<optional, enables AI-quality extraction summaries>`
+- `OPENAI_SUMMARY_MODEL=gpt-4.1-mini`
+- `EXTRACTION_AI_SUMMARY_ENABLED=true` (only if you set `OPENAI_API_KEY`)
 
 ## Notes
 

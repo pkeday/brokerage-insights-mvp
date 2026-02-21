@@ -156,6 +156,10 @@
                     Report Type
                     <select id="extracted-filter-type"></select>
                   </label>
+                  <label class="inline-check inline-check-compact">
+                    <input id="extracted-filter-include-duplicates" type="checkbox" />
+                    Include duplicates
+                  </label>
                   <button id="refresh-extracted-btn" class="btn" type="button">Refresh extracted list</button>
                 </div>
                 <div id="extracted-reports-meta" class="note"></div>
@@ -167,6 +171,7 @@
                         <th>Broker</th>
                         <th>Company</th>
                         <th>Type</th>
+                        <th>Dedupe</th>
                         <th>Title</th>
                         <th>Summary</th>
                         <th>Confidence</th>

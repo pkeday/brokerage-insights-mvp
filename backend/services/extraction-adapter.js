@@ -1,6 +1,8 @@
 import { access } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { redactArchiveForExtraction, redactPiiText } from "../extraction/pii-redaction.js";
+import { createInsightSummarizer } from "./insight-summarizer.js";
 
 const EXTERNAL_EXTRACTION_MODULE_CANDIDATES = [
   "extraction/index.js",
@@ -69,16 +71,7 @@ function normalizeCompanyRaw(value, fallback) {
 
 function normalizeCompanyCanonical(value, fallbackRaw) {
   const seed = normalizeText(value) || normalizeText(fallbackRaw);
-  if (!seed) {
-    return "unknown-company";
-  }
-
-  return seed
-    .toLowerCase()
-    .replace(/&/g, " and ")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 120) || "unknown-company";
+  return seed || "Unknown Company";
 }
 
 function normalizePublishedAt(value, fallback) {
@@ -129,7 +122,7 @@ function createFallbackExtractionResult({ archive, userId }) {
     companyCanonical: normalizeCompanyCanonical(null, companyRaw),
     reportType: detectReportType(archive.subject, archive.bodyPreview || archive.snippet),
     title: normalizeTitle(archive.subject),
-    summary,
+    summary: redactPiiText(summary),
     keyPoints: sanitizeKeyPoints(null, summary),
     publishedAt: normalizePublishedAt(archive.dateHeader, archive.ingestedAt),
     confidence: 0.25
@@ -141,6 +134,7 @@ function pickExtractor(moduleValue) {
     moduleValue?.extractArchiveReport,
     moduleValue?.extractFromArchive,
     moduleValue?.extractReport,
+    moduleValue?.parseArchiveToReport,
     moduleValue?.default
   ];
 
@@ -153,7 +147,20 @@ function pickExtractor(moduleValue) {
   if (moduleValue?.default && typeof moduleValue.default.extractArchiveReport === "function") {
     return moduleValue.default.extractArchiveReport;
   }
+  if (moduleValue?.default && typeof moduleValue.default.parseArchiveToReport === "function") {
+    return ({ archive }) => moduleValue.default.parseArchiveToReport(archive);
+  }
 
+  return null;
+}
+
+function pickParser(moduleValue) {
+  if (typeof moduleValue?.parseArchiveToReport === "function") {
+    return moduleValue.parseArchiveToReport;
+  }
+  if (typeof moduleValue?.default?.parseArchiveToReport === "function") {
+    return moduleValue.default.parseArchiveToReport;
+  }
   return null;
 }
 
@@ -175,11 +182,12 @@ function normalizeExtractorResult(result, context) {
     companyRaw,
     companyCanonical,
     reportType: normalizeText(result.reportType) || fallback.reportType,
-    title: normalizeTitle(result.title || archive.subject),
+    title: redactPiiText(normalizeTitle(result.title || archive.subject)),
     summary,
-    keyPoints: sanitizeKeyPoints(result.keyPoints, summary),
+    keyPoints: sanitizeKeyPoints(result.keyPoints, summary).map((entry) => redactPiiText(entry)),
     publishedAt: normalizePublishedAt(result.publishedAt, fallback.publishedAt),
-    confidence: normalizeConfidence(result.confidence, fallback.confidence)
+    confidence: normalizeConfidence(result.confidence, fallback.confidence),
+    duplicateKey: normalizeText(result.duplicateKey)
   };
 }
 
@@ -200,9 +208,31 @@ async function tryImportModule(absolutePath) {
 export async function createExtractionAdapter(options = {}) {
   const log = typeof options.log === "function" ? options.log : () => {};
   const backendRootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const summarizer = createInsightSummarizer({
+    apiKey: options.openAiApiKey,
+    model: options.openAiModel,
+    enabled: options.aiSummaryEnabled
+  });
   const candidateModules = Array.isArray(options.candidateModules) && options.candidateModules.length > 0
     ? options.candidateModules
     : EXTERNAL_EXTRACTION_MODULE_CANDIDATES;
+
+  async function enrichExtractedResult(normalizedResult, archive) {
+    const insight = await summarizer.summarize({
+      report: normalizedResult,
+      archive
+    });
+
+    const summary = normalizeSummary(insight?.summary, normalizedResult.summary);
+    const keyPoints = sanitizeKeyPoints(insight?.keyPoints, summary).map((entry) => redactPiiText(entry));
+
+    return {
+      ...normalizedResult,
+      title: redactPiiText(normalizedResult.title),
+      summary: redactPiiText(summary),
+      keyPoints
+    };
+  }
 
   for (const relativePath of candidateModules) {
     const absolutePath = path.resolve(backendRootDir, relativePath);
@@ -211,8 +241,9 @@ export async function createExtractionAdapter(options = {}) {
       continue;
     }
 
-    const extractor = pickExtractor(moduleValue);
-    if (!extractor) {
+    const parser = pickParser(moduleValue);
+    const extractor = parser ? null : pickExtractor(moduleValue);
+    if (!parser && !extractor) {
       continue;
     }
 
@@ -220,12 +251,19 @@ export async function createExtractionAdapter(options = {}) {
     return {
       source: `module:${relativePath}`,
       async extractFromArchive(context) {
-        const result = await extractor({
-          archive: context.archive,
-          userId: context.userId,
-          runId: context.runId
-        });
-        return normalizeExtractorResult(result, context);
+        const redactedArchive = redactArchiveForExtraction(context.archive);
+        const result = parser
+          ? parser({
+              ...redactedArchive,
+              userId: context.userId
+            })
+          : await extractor({
+              archive: redactedArchive,
+              userId: context.userId,
+              runId: context.runId
+            });
+        const normalized = normalizeExtractorResult(result, { ...context, archive: redactedArchive });
+        return enrichExtractedResult(normalized, redactedArchive);
       }
     };
   }
@@ -234,7 +272,12 @@ export async function createExtractionAdapter(options = {}) {
   return {
     source: "fallback:heuristic",
     async extractFromArchive(context) {
-      return createFallbackExtractionResult(context);
+      const redactedArchive = redactArchiveForExtraction(context.archive);
+      const fallback = createFallbackExtractionResult({
+        ...context,
+        archive: redactedArchive
+      });
+      return enrichExtractedResult(fallback, redactedArchive);
     }
   };
 }
