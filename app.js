@@ -350,6 +350,7 @@ const refs = {
   ingestSetupCloseBtn: document.getElementById("ingest-setup-close-btn"),
   ingestSetupCancelBtn: document.getElementById("ingest-setup-cancel-btn"),
   ingestSetupSaveBtn: document.getElementById("ingest-setup-save-btn"),
+  ingestSetupResetDataBtn: document.getElementById("ingest-setup-reset-data-btn"),
   ingestSetupRefreshLabelsBtn: document.getElementById("ingest-setup-refresh-labels-btn"),
   ingestSetupSelectAllBtn: document.getElementById("ingest-setup-select-all-btn"),
   ingestSetupClearAllBtn: document.getElementById("ingest-setup-clear-all-btn"),
@@ -540,6 +541,11 @@ function bindEvents() {
   refs.ingestSetupSaveBtn.addEventListener("click", async () => {
     await saveIngestSetup();
   });
+  if (refs.ingestSetupResetDataBtn) {
+    refs.ingestSetupResetDataBtn.addEventListener("click", async () => {
+      await resetPipelineDataForCurrentUser();
+    });
+  }
   refs.ingestSetupLabels.addEventListener("change", (event) => {
     const input = event.target;
     if (!(input instanceof HTMLInputElement) || input.type !== "checkbox") {
@@ -2318,6 +2324,9 @@ function renderIngestSetupModal() {
   refs.ingestSetupStartNow.checked = state.ingestSetup.startFromNow;
   refs.ingestSetupResetCursor.checked = state.ingestSetup.resetCursor;
   refs.ingestSetupSaveBtn.disabled = state.ingestSetup.saving || state.ingestSetup.loading;
+  if (refs.ingestSetupResetDataBtn) {
+    refs.ingestSetupResetDataBtn.disabled = state.ingestSetup.saving || state.ingestSetup.loading;
+  }
   refs.ingestSetupRefreshLabelsBtn.disabled = state.ingestSetup.saving || state.ingestSetup.loading;
 
   if (state.ingestSetup.loading) {
@@ -2461,6 +2470,64 @@ async function saveIngestSetup() {
   } catch (error) {
     state.ingestSetup.statusMessage = `Save failed: ${error.message}`;
     renderIngestSetupModal();
+  } finally {
+    state.ingestSetup.saving = false;
+    renderIngestSetupModal();
+  }
+}
+
+async function resetPipelineDataForCurrentUser() {
+  if (!state.auth.token) {
+    setPipelineMessage("Sign in with Google before resetting pipeline data.");
+    return;
+  }
+
+  const confirmed = window.confirm(
+    "This will delete your archived emails, extraction runs, and extracted reports, and reset ingest cursor to oldest. Continue?"
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  state.ingestSetup.saving = true;
+  state.ingestSetup.statusMessage = "Resetting ingest + extraction data...";
+  renderIngestSetupModal();
+
+  try {
+    const payload = await apiFetch("/api/pipeline/reset", {
+      method: "POST",
+      body: JSON.stringify({
+        clearArchives: true,
+        clearExtraction: true,
+        resetCursor: true
+      })
+    });
+
+    state.archives.items = [];
+    state.archives.total = 0;
+    state.archives.fetchedAt = null;
+    state.extraction.runs = [];
+    state.extraction.runsTotal = 0;
+    state.extraction.lastRun = null;
+    state.extraction.reports = [];
+    state.extraction.reportsTotal = 0;
+    state.extraction.fetchedAt = null;
+    state.extraction.statusMessage = "Extraction workspace reset. Run ingest with a small date range to retest.";
+    state.digestApi.preview = null;
+    state.digestApi.error = "";
+    state.digestApi.lastSentAt = null;
+
+    await Promise.allSettled([fetchArchives(), refreshExtractionWorkspace()]);
+
+    setPipelineMessage(
+      `Reset complete: removed ${payload.removedArchives || 0} archives, ${payload.removedExtractedReports || 0} extracted reports, ${payload.removedExtractionRuns || 0} extraction runs.`
+    );
+    state.ingestSetup.statusMessage = "Reset complete. Configure labels/date range, then run ingest.";
+    renderAllDataViews();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Reset failed";
+    state.ingestSetup.statusMessage = `Reset failed: ${message}`;
+    setPipelineMessage(`Reset failed: ${message}`);
   } finally {
     state.ingestSetup.saving = false;
     renderIngestSetupModal();

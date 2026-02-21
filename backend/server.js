@@ -2013,6 +2013,65 @@ async function handleGmailIngest(req, res, auth) {
   });
 }
 
+async function handleResetPipelineData(req, res, auth) {
+  const body = await readJsonBody(req);
+  const clearArchives = body.clearArchives !== false;
+  const clearExtraction = body.clearExtraction !== false;
+  const resetCursor = body.resetCursor !== false;
+  const force = body.force === true;
+  const activeStatuses = new Set(["queued", "running"]);
+  const activeRuns = db.extractionRuns.filter(
+    (entry) => entry.userId === auth.user.id && activeStatuses.has(String(entry.status || "").toLowerCase())
+  );
+
+  if (activeRuns.length > 0 && !force) {
+    sendJson(req, res, 409, {
+      error: "Extraction run is currently active. Wait for completion or retry with force=true.",
+      activeRunCount: activeRuns.length
+    });
+    return;
+  }
+
+  let removedArchives = 0;
+  let removedExtractedReports = 0;
+  let removedExtractionRuns = 0;
+
+  if (clearArchives) {
+    const before = db.emailArchives.length;
+    db.emailArchives = db.emailArchives.filter((entry) => entry.userId !== auth.user.id);
+    removedArchives = before - db.emailArchives.length;
+  }
+
+  if (clearExtraction) {
+    const beforeReports = db.extractedReports.length;
+    const beforeRuns = db.extractionRuns.length;
+    db.extractedReports = db.extractedReports.filter((entry) => entry.userId !== auth.user.id);
+    db.extractionRuns = db.extractionRuns.filter((entry) => entry.userId !== auth.user.id);
+    removedExtractedReports = beforeReports - db.extractedReports.length;
+    removedExtractionRuns = beforeRuns - db.extractionRuns.length;
+  }
+
+  const prefs = getOrCreateGmailPreferences(auth.user.id);
+  if (resetCursor) {
+    prefs.lastIngestAfterEpoch = 0;
+    prefs.lastScheduledRunDate = null;
+    prefs.lastIngestAt = null;
+  }
+  prefs.updatedAt = new Date().toISOString();
+
+  await persistDb();
+
+  sendJson(req, res, 200, {
+    ok: true,
+    clearArchives,
+    clearExtraction,
+    resetCursor,
+    removedArchives,
+    removedExtractedReports,
+    removedExtractionRuns
+  });
+}
+
 function parsePaginationParams(requestUrl, fallbackLimit = 30) {
   const limitRaw = Number(requestUrl.searchParams.get("limit") ?? String(fallbackLimit));
   const offsetRaw = Number(requestUrl.searchParams.get("offset") ?? "0");
@@ -2633,6 +2692,7 @@ const server = createServer(async (req, res) => {
           "GET /api/gmail/labels",
           "GET/PUT /api/gmail/preferences",
           "POST /api/gmail/ingest",
+          "POST /api/pipeline/reset",
           "GET /api/email-archives",
           "POST /api/extraction/runs",
           "GET /api/extraction/runs",
@@ -2756,6 +2816,17 @@ const server = createServer(async (req, res) => {
       }
       if (method === "POST") {
         await handleGmailIngest(req, res, auth);
+        return;
+      }
+    }
+
+    if (pathName === "/api/pipeline/reset") {
+      const auth = requireAuth(req, res);
+      if (!auth) {
+        return;
+      }
+      if (method === "POST") {
+        await handleResetPipelineData(req, res, auth);
         return;
       }
     }

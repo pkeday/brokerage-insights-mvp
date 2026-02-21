@@ -141,6 +141,18 @@ body {
   color: #ffffff;
 }
 
+.btn.danger {
+  background: #fff2f0;
+  border-color: #d8a39c;
+  color: #7d2920;
+}
+
+.btn.danger:hover {
+  background: #fce8e5;
+  border-color: #c9867d;
+  color: #6c2018;
+}
+
 .btn[disabled] {
   opacity: 0.55;
   cursor: not-allowed;
