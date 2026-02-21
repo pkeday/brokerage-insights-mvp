@@ -623,6 +623,8 @@ function bindEvents() {
       const extractedCount = Number(companyPipeline.extractedCompanyUpdates || 0);
       const duplicatesMarked = Number(companyPipeline.duplicatesMarked || 0);
       const aiFailures = Number(companyPipeline.aiFailedEmails || 0);
+      const aiFallbackEmails = Number(companyPipeline.aiFallbackEmails || 0);
+      const aiFailureSamples = Array.isArray(companyPipeline.aiFailureSamples) ? companyPipeline.aiFailureSamples : [];
       const companyPipelineError = String(companyPipeline.error || "").trim();
       const cursorAfter = Number(summary.cursorAfterEpoch || 0);
       const cursorLabel = cursorAfter > 0 ? new Date(cursorAfter * 1000).toLocaleString() : "not set";
@@ -634,7 +636,7 @@ function bindEvents() {
         );
       } else {
         setPipelineMessage(
-          `Ingest complete: fetched ${fetchedCount} (pages ${pagesScanned}), archived ${archivedCount}, skipped ${skippedCount} (already archived ${alreadyArchivedCount}), reprocessed archived ${reprocessedArchivedCount}, extracted ${extractedCount}, duplicates marked ${duplicatesMarked}, AI failures ${aiFailures}.`
+          `Ingest complete: fetched ${fetchedCount} (pages ${pagesScanned}), archived ${archivedCount}, skipped ${skippedCount} (already archived ${alreadyArchivedCount}), reprocessed archived ${reprocessedArchivedCount}, extracted ${extractedCount}, duplicates marked ${duplicatesMarked}, fallback ${aiFallbackEmails}, AI failures ${aiFailures}.`
         );
       }
       if (fetchedCount > 0 && archivedCount === 0 && alreadyArchivedCount === fetchedCount) {
@@ -649,6 +651,13 @@ function bindEvents() {
       }
       if (companyPipelineError) {
         setPipelineMessage(`Ingest finished, but company extraction had an error: ${companyPipelineError}`);
+      }
+      if (aiFailures > 0 && aiFailureSamples.length > 0) {
+        const sample = aiFailureSamples[0];
+        const sampleError = String(sample?.error || "").trim();
+        if (sampleError) {
+          setPipelineMessage(`AI extraction error sample: ${sampleError}`);
+        }
       }
       await Promise.allSettled([fetchArchives(), fetchCompanyUpdatesDb({ silent: true }), refreshExtractionWorkspace()]);
       if (state.view === "digest") {

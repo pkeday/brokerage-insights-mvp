@@ -758,6 +758,8 @@ async function runCompanyUpdatePipelineForIngestedRecords(user, ingestedRecords)
       ingestedEmails: 0,
       aiProcessedEmails: 0,
       aiFailedEmails: 0,
+      aiFallbackEmails: 0,
+      aiFailureSamples: [],
       extractedCompanyUpdates: 0,
       duplicatesMarked: 0,
       source: companyUpdateExtractor.source
@@ -774,7 +776,9 @@ async function runCompanyUpdatePipelineForIngestedRecords(user, ingestedRecords)
 
   let aiProcessedEmails = 0;
   let aiFailedEmails = 0;
+  let aiFallbackEmails = 0;
   let extractedCompanyUpdates = 0;
+  const aiFailureSamples = [];
 
   for (const emailRecord of rows) {
     await setIngestedEmailAiStatus(user.id, emailRecord.id, "processing", null);
@@ -798,11 +802,15 @@ async function runCompanyUpdatePipelineForIngestedRecords(user, ingestedRecords)
       const normalizedReports = Array.isArray(extraction?.reports)
         ? extraction.reports.map((entry) => ({ ...entry, broker: emailRecord.broker }))
         : [];
+      const extractionSource = normalizeText(extraction?.source || companyUpdateExtractor.source);
+      if (extractionSource.toLowerCase().startsWith("heuristic:")) {
+        aiFallbackEmails += 1;
+      }
       const replaceResult = await replaceCompanyUpdatesForEmail(
         user.id,
         emailRecord,
         normalizedReports,
-        extraction?.source || companyUpdateExtractor.source,
+        extractionSource,
         extraction?.rawResponse || {}
       );
       extractedCompanyUpdates += replaceResult.inserted;
@@ -810,11 +818,21 @@ async function runCompanyUpdatePipelineForIngestedRecords(user, ingestedRecords)
       await setIngestedEmailAiStatus(user.id, emailRecord.id, "completed", null);
     } catch (error) {
       aiFailedEmails += 1;
+      const message = error instanceof Error ? error.message.slice(0, 600) : "AI extraction failed";
+      if (aiFailureSamples.length < 3) {
+        aiFailureSamples.push({
+          emailRecordId: String(emailRecord.id),
+          archiveId: normalizeText(emailRecord.archive_id),
+          broker: normalizeText(emailRecord.broker),
+          subject: normalizeText(emailRecord.subject).slice(0, 120),
+          error: message
+        });
+      }
       await setIngestedEmailAiStatus(
         user.id,
         emailRecord.id,
         "failed",
-        error instanceof Error ? error.message.slice(0, 600) : "AI extraction failed"
+        message
       );
     }
   }
@@ -824,6 +842,8 @@ async function runCompanyUpdatePipelineForIngestedRecords(user, ingestedRecords)
     ingestedEmails: rows.length,
     aiProcessedEmails,
     aiFailedEmails,
+    aiFallbackEmails,
+    aiFailureSamples,
     extractedCompanyUpdates,
     duplicatesMarked: dedupeSummary.markedDuplicates,
     source: companyUpdateExtractor.source
@@ -2472,6 +2492,7 @@ async function runScheduledIngests(trigger = "scheduled") {
   let archivedCount = 0;
   let aiProcessedEmails = 0;
   let aiFailedEmails = 0;
+  let aiFallbackEmails = 0;
   let extractedCompanyUpdates = 0;
   let dedupeMarkedDuplicates = 0;
 
@@ -2504,6 +2525,8 @@ async function runScheduledIngests(trigger = "scheduled") {
         ingestedEmails: 0,
         aiProcessedEmails: 0,
         aiFailedEmails: 0,
+        aiFallbackEmails: 0,
+        aiFailureSamples: [],
         extractedCompanyUpdates: 0,
         duplicatesMarked: 0,
         source: companyUpdateExtractor.source,
@@ -2527,6 +2550,7 @@ async function runScheduledIngests(trigger = "scheduled") {
       archivedCount += ingest.summary.archivedCount;
       aiProcessedEmails += Number(companyPipeline.aiProcessedEmails || 0);
       aiFailedEmails += Number(companyPipeline.aiFailedEmails || 0);
+      aiFallbackEmails += Number(companyPipeline.aiFallbackEmails || 0);
       extractedCompanyUpdates += Number(companyPipeline.extractedCompanyUpdates || 0);
       dedupeMarkedDuplicates += Number(companyPipeline.duplicatesMarked || 0);
       details.push({
@@ -2558,6 +2582,7 @@ async function runScheduledIngests(trigger = "scheduled") {
     archivedCount,
     aiProcessedEmails,
     aiFailedEmails,
+    aiFallbackEmails,
     extractedCompanyUpdates,
     dedupeMarkedDuplicates,
     details
@@ -2635,6 +2660,8 @@ async function handleGmailIngest(req, res, auth) {
     ingestedEmails: 0,
     aiProcessedEmails: 0,
     aiFailedEmails: 0,
+    aiFallbackEmails: 0,
+    aiFailureSamples: [],
     extractedCompanyUpdates: 0,
     duplicatesMarked: 0,
     source: companyUpdateExtractor.source,
