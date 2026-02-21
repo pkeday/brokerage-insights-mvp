@@ -284,6 +284,7 @@ const state = {
     },
     statusMessage: "Checking extraction endpoints...",
     runStarting: false,
+    abortingRunId: "",
     reprocessExisting: false,
     runsLoading: false,
     reportsLoading: false,
@@ -713,6 +714,22 @@ function bindEvents() {
   if (refs.extractedFilterCompany) {
     refs.extractedFilterCompany.addEventListener("input", () => {
       scheduleExtractionCompanySearch();
+    });
+  }
+
+  if (refs.extractionRunsTable) {
+    refs.extractionRunsTable.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-abort-run]");
+      if (!(button instanceof HTMLButtonElement)) {
+        return;
+      }
+
+      const runId = String(button.dataset.abortRun || "").trim();
+      if (!runId) {
+        return;
+      }
+
+      void abortExtractionRun(runId);
     });
   }
 
@@ -1218,21 +1235,30 @@ function renderExtractionWorkspace() {
 
   if (state.extraction.runsLoading && state.extraction.runs.length === 0) {
     refs.extractionRunsTable.innerHTML =
-      '<tr><td colspan="5"><div class="empty-state">Loading extraction run history...</div></td></tr>';
+      '<tr><td colspan="6"><div class="empty-state">Loading extraction run history...</div></td></tr>';
   } else if (runsUnavailable) {
     refs.extractionRunsTable.innerHTML =
-      '<tr><td colspan="5"><div class="empty-state">Extraction run history endpoint is unavailable in this environment.</div></td></tr>';
+      '<tr><td colspan="6"><div class="empty-state">Extraction run history endpoint is unavailable in this environment.</div></td></tr>';
   } else if (state.extraction.runsError) {
-    refs.extractionRunsTable.innerHTML = `<tr><td colspan="5"><div class="empty-state">Failed to load extraction runs: ${escapeHtml(
+    refs.extractionRunsTable.innerHTML = `<tr><td colspan="6"><div class="empty-state">Failed to load extraction runs: ${escapeHtml(
       state.extraction.runsError
     )}</div></td></tr>`;
   } else if (state.extraction.runs.length === 0) {
     refs.extractionRunsTable.innerHTML =
-      '<tr><td colspan="5"><div class="empty-state">No extraction runs yet. Trigger a run to populate history.</div></td></tr>';
+      '<tr><td colspan="6"><div class="empty-state">No extraction runs yet. Trigger a run to populate history.</div></td></tr>';
   } else {
     refs.extractionRunsTable.innerHTML = state.extraction.runs
       .map((run) => {
         const status = formatExtractionRunStatus(run.status);
+        const abortable = isExtractionRunAbortable(run);
+        const abortPending = run.abortPending === true;
+        const aborting = state.extraction.abortingRunId === run.id;
+        const disableAbort = aborting || abortPending || state.extraction.runStarting || state.extraction.runsLoading;
+        const action = abortable
+          ? `<button class="btn extraction-abort-btn" type="button" data-abort-run="${escapeAttribute(run.id)}"${
+              disableAbort ? " disabled" : ""
+            }>${aborting ? "Aborting..." : abortPending ? "Abort requested" : "Abort run"}</button>`
+          : `<span class="muted-inline">-</span>`;
         return `
           <tr>
             <td>${escapeHtml(formatDateTime(run.startedAt))}</td>
@@ -1240,6 +1266,7 @@ function renderExtractionWorkspace() {
             <td>${escapeHtml(formatCount(run.processedCount))}</td>
             <td>${escapeHtml(formatCount(run.extractedCount))}</td>
             <td>${escapeHtml(formatCount(run.duplicatesCount))}</td>
+            <td>${action}</td>
           </tr>
         `;
       })
@@ -1431,6 +1458,19 @@ function extractionStatusClass(value) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "") || "unknown"}`;
+}
+
+function isExtractionRunAbortable(run) {
+  const status = String(run?.status ?? "").trim().toLowerCase();
+  if (!status) {
+    return false;
+  }
+
+  if (status !== "queued" && status !== "running") {
+    return false;
+  }
+
+  return run?.abortPending !== true;
 }
 
 function renderReportCard(report) {
@@ -2692,6 +2732,7 @@ async function fetchArchives() {
 function resetExtractionStateForSignedOut() {
   state.extraction.statusMessage = "Sign in with Google to access extraction runs and extracted reports.";
   state.extraction.runStarting = false;
+  state.extraction.abortingRunId = "";
   state.extraction.runsLoading = false;
   state.extraction.reportsLoading = false;
   state.extraction.runsError = "";
@@ -2775,6 +2816,54 @@ async function triggerExtractionRun() {
     state.extraction.statusMessage = `Extraction run failed: ${result.error?.message || "Unknown error"}`;
   } finally {
     state.extraction.runStarting = false;
+    renderExtractionWorkspace();
+  }
+}
+
+async function abortExtractionRun(runId) {
+  const normalizedRunId = String(runId ?? "").trim();
+  if (!normalizedRunId || !state.auth.token) {
+    return;
+  }
+
+  const run = state.extraction.runs.find((entry) => entry.id === normalizedRunId);
+  if (!run || !isExtractionRunAbortable(run)) {
+    return;
+  }
+
+  const confirmed = window.confirm(`Abort extraction run ${normalizedRunId}?`);
+  if (!confirmed) {
+    return;
+  }
+
+  state.extraction.abortingRunId = normalizedRunId;
+  state.extraction.statusMessage = `Sending abort request for run ${normalizedRunId}...`;
+  renderExtractionWorkspace();
+
+  try {
+    const payload = await apiFetch(`/api/extraction/runs/${encodeURIComponent(normalizedRunId)}/abort`, {
+      method: "POST",
+      body: JSON.stringify({
+        reason: "Aborted from web UI"
+      })
+    });
+
+    if (payload?.accepted) {
+      const mode = payload.immediate ? "aborted immediately" : "abort requested";
+      setPipelineMessage(`Extraction run ${normalizedRunId}: ${mode}.`);
+      state.extraction.statusMessage = `Extraction run ${normalizedRunId}: ${mode}.`;
+    } else {
+      setPipelineMessage(`Extraction run ${normalizedRunId} is already finished.`);
+      state.extraction.statusMessage = `Extraction run ${normalizedRunId} is already finished.`;
+    }
+
+    await refreshExtractionWorkspace();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown abort error";
+    state.extraction.statusMessage = `Failed to abort run ${normalizedRunId}: ${message}`;
+    setPipelineMessage(`Failed to abort extraction run: ${message}`);
+  } finally {
+    state.extraction.abortingRunId = "";
     renderExtractionWorkspace();
   }
 }
@@ -3043,6 +3132,13 @@ function normalizeExtractionRun(entry) {
     ])
   );
   const status = String(pickFirstValue(entry, ["status", "state", "runStatus", "run_status"], "unknown") || "unknown").trim();
+  const abortRequestedAt = normalizeDateTimeValue(pickFirstValue(entry, ["abortRequestedAt", "abort_requested_at"], ""));
+  const abortedAt = normalizeDateTimeValue(pickFirstValue(entry, ["abortedAt", "aborted_at"], ""));
+  const abortPending =
+    status.toLowerCase() === "running" &&
+    Boolean(abortRequestedAt) &&
+    !abortedAt &&
+    pickFirstValue(entry, ["abortPending", "abort_pending"], true) !== false;
   const processedCount = pickFirstNumber(entry, [
     "processedCount",
     "processed_count",
@@ -3076,6 +3172,9 @@ function normalizeExtractionRun(entry) {
     id: String(pickFirstValue(entry, ["id", "runId", "run_id", "jobId", "job_id"], "") || "").trim(),
     startedAt,
     status: status || "unknown",
+    abortRequestedAt,
+    abortedAt,
+    abortPending,
     processedCount,
     extractedCount,
     duplicatesCount,

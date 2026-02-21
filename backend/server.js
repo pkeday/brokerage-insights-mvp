@@ -2334,9 +2334,9 @@ async function handleTriggerExtractionRun(req, res, auth) {
 async function handleListExtractionRuns(req, res, auth, requestUrl) {
   const { limit, offset } = parsePaginationParams(requestUrl, 20);
   const status = requestUrl.searchParams.get("status")?.trim().toLowerCase() || null;
-  if (status && !["queued", "running", "completed", "failed"].includes(status)) {
+  if (status && !["queued", "running", "completed", "failed", "aborted"].includes(status)) {
     sendJson(req, res, 400, {
-      error: "status must be one of: queued, running, completed, failed."
+      error: "status must be one of: queued, running, completed, failed, aborted."
     });
     return;
   }
@@ -2362,6 +2362,32 @@ async function handleGetExtractionRunStatus(req, res, auth, runId) {
   }
 
   sendJson(req, res, 200, { run });
+}
+
+async function handleAbortExtractionRun(req, res, auth, runId) {
+  const body = await readJsonBody(req);
+  const reason =
+    body.reason === undefined || body.reason === null ? undefined : String(body.reason).trim() || undefined;
+
+  const result = await extractionOrchestrator.abortRun({
+    userId: auth.user.id,
+    runId,
+    reason
+  });
+
+  if (!result) {
+    sendJson(req, res, 404, { error: "Extraction run not found." });
+    return;
+  }
+
+  const statusCode = result.accepted ? 202 : 200;
+  sendJson(req, res, statusCode, {
+    ok: true,
+    accepted: result.accepted,
+    immediate: result.immediate,
+    alreadyTerminal: result.alreadyTerminal,
+    run: result.run
+  });
 }
 
 async function handleListExtractedReports(req, res, auth, requestUrl) {
@@ -2697,6 +2723,7 @@ const server = createServer(async (req, res) => {
           "POST /api/extraction/runs",
           "GET /api/extraction/runs",
           "GET /api/extraction/runs/:runId/status",
+          "POST /api/extraction/runs/:runId/abort",
           "GET /api/extracted-reports",
           "GET /api/digest/preview",
           "POST /api/digest/send"
@@ -2844,6 +2871,24 @@ const server = createServer(async (req, res) => {
 
       if (method === "GET") {
         await handleListExtractionRuns(req, res, auth, requestUrl);
+        return;
+      }
+    }
+
+    if (
+      segments.length === 5 &&
+      segments[0] === "api" &&
+      segments[1] === "extraction" &&
+      segments[2] === "runs" &&
+      segments[4] === "abort"
+    ) {
+      const auth = requireAuth(req, res);
+      if (!auth) {
+        return;
+      }
+
+      if (method === "POST") {
+        await handleAbortExtractionRun(req, res, auth, segments[3]);
         return;
       }
     }

@@ -602,6 +602,31 @@ input[type="checkbox"] {
   color: #7a352b;
 }
 
+.tag.extraction-status-aborted {
+  background: #f8f1e6;
+  border-color: #d7be96;
+  color: #7a5621;
+}
+
+.extraction-abort-btn {
+  padding: 4px 8px;
+  font-size: 10px;
+  background: #fff2f0;
+  border-color: #d8a39c;
+  color: #7d2920;
+}
+
+.extraction-abort-btn:hover {
+  background: #fce8e5;
+  border-color: #c9867d;
+  color: #6c2018;
+}
+
+.muted-inline {
+  color: #778d86;
+  font-size: 11px;
+}
+
 #extracted-reports-table td:nth-child(7) {
   min-width: 320px;
   max-width: 520px;

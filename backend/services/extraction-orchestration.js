@@ -5,10 +5,12 @@ const RUN_STATUS = {
   QUEUED: "queued",
   RUNNING: "running",
   COMPLETED: "completed",
-  FAILED: "failed"
+  FAILED: "failed",
+  ABORTED: "aborted"
 };
 
 const ALLOWED_RUN_STATUSES = new Set(Object.values(RUN_STATUS));
+const TERMINAL_RUN_STATUSES = new Set([RUN_STATUS.COMPLETED, RUN_STATUS.FAILED, RUN_STATUS.ABORTED]);
 const MAX_FAILURE_SAMPLES = 25;
 const SIMILARITY_STOP_WORDS = new Set([
   "the",
@@ -149,6 +151,10 @@ function makeRunPublic(run) {
     failureSamples: run.failureSamples ?? [],
     createdAt: run.createdAt,
     startedAt: run.startedAt ?? null,
+    abortRequestedAt: run.abortRequestedAt ?? null,
+    abortedAt: run.abortedAt ?? null,
+    abortReason: run.abortReason ?? null,
+    abortPending: Boolean(run.abortRequestedAt && !run.abortedAt && run.status === RUN_STATUS.RUNNING),
     completedAt: run.completedAt ?? null,
     updatedAt: run.updatedAt
   };
@@ -289,10 +295,31 @@ export async function createExtractionOrchestrator(options) {
     await persistDb();
   }
 
+  function markRunAborted(run, timestamp = nowIso(), reason = "Aborted by user") {
+    const normalizedReason = normalizeText(reason) || "Aborted by user";
+    run.status = RUN_STATUS.ABORTED;
+    run.abortRequestedAt = run.abortRequestedAt || timestamp;
+    run.abortReason = normalizedReason;
+    run.error = normalizedReason;
+    run.abortedAt = timestamp;
+    run.completedAt = timestamp;
+    run.updatedAt = timestamp;
+  }
+
   async function runExtraction(runId) {
     const db = withDb();
     const run = db.extractionRuns.find((entry) => entry.id === runId);
     if (!run) {
+      return;
+    }
+
+    if (TERMINAL_RUN_STATUSES.has(run.status)) {
+      return;
+    }
+
+    if (run.abortRequestedAt) {
+      markRunAborted(run, nowIso(), run.abortReason || run.error || "Aborted before start");
+      await persistState();
       return;
     }
 
@@ -309,6 +336,12 @@ export async function createExtractionOrchestrator(options) {
       );
 
       for (const archiveId of run.archiveIds) {
+        if (run.abortRequestedAt) {
+          markRunAborted(run, nowIso(), run.abortReason || "Aborted by user");
+          await persistState();
+          return;
+        }
+
         const processingAt = nowIso();
         const archive = archivesById.get(archiveId);
         run.stats.processedArchives += 1;
@@ -413,6 +446,12 @@ export async function createExtractionOrchestrator(options) {
       run.updatedAt = run.completedAt;
       await persistState();
     } catch (error) {
+      if (run.abortRequestedAt) {
+        markRunAborted(run, nowIso(), run.abortReason || "Aborted by user");
+        await persistState();
+        return;
+      }
+
       run.status = RUN_STATUS.FAILED;
       run.error = error instanceof Error ? error.message : String(error);
       run.completedAt = nowIso();
@@ -494,6 +533,9 @@ export async function createExtractionOrchestrator(options) {
       error: null,
       createdAt: now,
       startedAt: null,
+      abortRequestedAt: null,
+      abortedAt: null,
+      abortReason: null,
       completedAt: null,
       updatedAt: now
     };
@@ -545,6 +587,49 @@ export async function createExtractionOrchestrator(options) {
     const db = withDb();
     const run = db.extractionRuns.find((entry) => entry.userId === userId && entry.id === runId);
     return run ? makeRunPublic(run) : null;
+  }
+
+  async function abortRun(params) {
+    const userId = normalizeText(params?.userId);
+    const runId = normalizeText(params?.runId);
+    if (!userId || !runId) {
+      throw new Error("userId and runId are required");
+    }
+
+    const db = withDb();
+    const run = db.extractionRuns.find((entry) => entry.userId === userId && entry.id === runId);
+    if (!run) {
+      return null;
+    }
+
+    if (TERMINAL_RUN_STATUSES.has(run.status)) {
+      return {
+        accepted: false,
+        immediate: false,
+        alreadyTerminal: true,
+        run: makeRunPublic(run)
+      };
+    }
+
+    const timestamp = nowIso();
+    const reason = normalizeText(params?.reason) || "Aborted by user";
+    run.abortRequestedAt = run.abortRequestedAt || timestamp;
+    run.abortReason = reason;
+    run.updatedAt = timestamp;
+
+    let immediate = false;
+    if (run.status === RUN_STATUS.QUEUED) {
+      markRunAborted(run, timestamp, reason);
+      immediate = true;
+    }
+
+    await persistState();
+    return {
+      accepted: true,
+      immediate,
+      alreadyTerminal: false,
+      run: makeRunPublic(run)
+    };
   }
 
   function listReports(params) {
@@ -629,6 +714,7 @@ export async function createExtractionOrchestrator(options) {
     triggerRun,
     listRuns,
     getRunStatus,
+    abortRun,
     listReports
   };
 }
