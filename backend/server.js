@@ -157,10 +157,7 @@ const extractionOrchestrator = await createExtractionOrchestrator({
   log
 });
 const companyUpdateExtractor = createCompanyUpdateExtractor({
-  apiKey: process.env.OPENAI_API_KEY,
-  model: process.env.COMPANY_EXTRACTION_MODEL || process.env.OPENAI_SUMMARY_MODEL || "gpt-4.1-mini",
-  enabled: process.env.COMPANY_EXTRACTION_AI_ENABLED ?? "true",
-  baseUrl: process.env.OPENAI_BASE_URL || "https://api.openai.com/v1"
+  apiKey: process.env.OPENAI_API_KEY
 });
 
 if (!configuredAuthSecret) {

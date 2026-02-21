@@ -262,16 +262,10 @@ Source: ${sourceText}`
 
 export function createInsightSummarizer(options = {}) {
   const apiKey = normalizeWhitespace(options.apiKey || process.env.OPENAI_API_KEY);
-  const enabledFlag = String(
-    options.enabled ?? process.env.EXTRACTION_AI_SUMMARY_ENABLED ?? (apiKey ? "true" : "false")
-  ).toLowerCase();
-  const enabled = enabledFlag === "true" || enabledFlag === "1" || enabledFlag === "yes";
-  const model = normalizeWhitespace(options.model || process.env.OPENAI_SUMMARY_MODEL || "gpt-4.1-mini");
-  const baseUrl = normalizeWhitespace(options.baseUrl || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1");
-  const timeoutMs = Number.parseInt(
-    String(options.timeoutMs || process.env.EXTRACTION_AI_TIMEOUT_MS || "9000"),
-    10
-  );
+  const enabled = options.enabled !== false && Boolean(apiKey);
+  const model = normalizeWhitespace(options.model || "gpt-5-nano");
+  const baseUrl = normalizeWhitespace(options.baseUrl || "https://api.openai.com/v1");
+  const timeoutMs = Number.parseInt(String(options.timeoutMs || "9000"), 10);
 
   const config = {
     apiKey,

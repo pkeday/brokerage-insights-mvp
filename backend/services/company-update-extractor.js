@@ -38,6 +38,9 @@ const SUMMARY_MAX_LENGTH = 320;
 const TITLE_MAX_LENGTH = 220;
 const KEY_INSIGHT_MAX_LENGTH = 180;
 const HEURISTIC_CONFIDENCE = 0.2;
+const OPENAI_BASE_URL = "https://api.openai.com/v1";
+const OPENAI_PRIMARY_MODEL = "gpt-5-mini";
+const OPENAI_FALLBACK_MODEL = "gpt-5-nano";
 
 const GENERIC_SUBJECT_TOKENS = new Set([
   "report",
@@ -573,14 +576,11 @@ function buildDictionaryContext(companyDictionary) {
 
 export function createCompanyUpdateExtractor(options = {}) {
   const apiKey = normalizeWhitespace(options.apiKey || process.env.OPENAI_API_KEY);
-  const enabledRaw = String(options.enabled ?? process.env.COMPANY_EXTRACTION_AI_ENABLED ?? "true").toLowerCase();
-  const enabled = enabledRaw === "true" || enabledRaw === "1" || enabledRaw === "yes";
-  const model = normalizeWhitespace(options.model || process.env.COMPANY_EXTRACTION_MODEL || "gpt-4.1-mini");
-  const baseUrl = normalizeWhitespace(options.baseUrl || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1");
-  const timeoutMsRaw = Number.parseInt(
-    String(options.timeoutMs || process.env.COMPANY_EXTRACTION_TIMEOUT_MS || "18000"),
-    10
-  );
+  const enabled = options.enabled !== false;
+  const primaryModel = normalizeWhitespace(options.modelPrimary || options.model || OPENAI_PRIMARY_MODEL);
+  const fallbackModel = normalizeWhitespace(options.modelFallback || OPENAI_FALLBACK_MODEL);
+  const baseUrl = normalizeWhitespace(options.baseUrl || OPENAI_BASE_URL);
+  const timeoutMsRaw = Number.parseInt(String(options.timeoutMs || "18000"), 10);
   const timeoutMs = Number.isFinite(timeoutMsRaw) ? Math.max(4000, Math.min(timeoutMsRaw, 45_000)) : 18_000;
 
   async function extractEmailToCompanies(params = {}) {
@@ -602,29 +602,18 @@ export function createCompanyUpdateExtractor(options = {}) {
       };
     }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-      const response = await fetch(`${baseUrl}/responses`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json"
+    const buildModelRequestBody = (modelName) => ({
+      model: modelName,
+      temperature: 0.1,
+      max_output_tokens: 1800,
+      input: [
+        {
+          role: "system",
+          content: "You extract brokerage email insights for expert users. Keep broker perspective distinct. Return strict JSON only."
         },
-        body: JSON.stringify({
-          model,
-          temperature: 0.1,
-          max_output_tokens: 1800,
-          input: [
-            {
-              role: "system",
-              content:
-                "You extract brokerage email insights for expert users. Keep broker perspective distinct. Return strict JSON only."
-            },
-            {
-              role: "user",
-              content: `Extract all company-wise updates from this ONE brokerage email.
+        {
+          role: "user",
+          content: `Extract all company-wise updates from this ONE brokerage email.
 Return strict JSON with shape:
 {"reports":[{"companyRaw":string,"companyCanonical":string,"sectorName":string,"reportType":string,"title":string,"summary":string,"keyInsights":string[],"decision":string,"confidence":number,"publishedAt":string}]}
 Rules:
@@ -641,59 +630,91 @@ ArchiveId: ${normalizeWhitespace(emailRecord.archiveId)}
 Canonical Company Dictionary: ${dictionaryContext}
 Email Content:
 ${sourceText}`
-            }
-          ]
-        }),
-        signal: controller.signal
-      });
-
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        const message = normalizeWhitespace(payload?.error?.message || payload?.error || `HTTP ${response.status}`);
-        throw new Error(`OpenAI extraction failed: ${message}`);
-      }
-
-      const responseText = parseResponseText(payload);
-      const parsed = parseJsonObject(responseText);
-      const sourceReports = Array.isArray(parsed?.reports) ? parsed.reports : [];
-      const sanitized = sourceReports
-        .map((record) => sanitizeRecord(record, fallbackContext))
-        .filter(Boolean)
-        .slice(0, 50);
-      const consolidated = consolidateCompanyReports(sanitized);
-
-      if (consolidated.length === 0) {
-        return {
-          source: `heuristic:empty_openai:${model}`,
-          reports: buildHeuristicReports(emailRecord, fallbackContext),
-          rawResponse: parsed && typeof parsed === "object" ? parsed : {}
-        };
-      }
-
-      return {
-        source: `openai:${model}`,
-        reports: consolidated,
-        rawResponse: parsed && typeof parsed === "object" ? parsed : {}
-      };
-    } catch (error) {
-      const fallbackReason = error instanceof Error ? error.message : "openai_request_failed";
-      return {
-        source: `heuristic:openai_failed:${model}`,
-        reports: buildHeuristicReports(emailRecord, fallbackContext),
-        rawResponse: {
-          fallback: true,
-          reason: fallbackReason
         }
-      };
-    } finally {
-      clearTimeout(timeout);
+      ]
+    });
+
+    async function runModel(modelName) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(`${baseUrl}/responses`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(buildModelRequestBody(modelName)),
+          signal: controller.signal
+        });
+
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const message = normalizeWhitespace(payload?.error?.message || payload?.error || `HTTP ${response.status}`);
+          throw new Error(`OpenAI extraction failed: ${message}`);
+        }
+
+        const responseText = parseResponseText(payload);
+        const parsed = parseJsonObject(responseText);
+        const sourceReports = Array.isArray(parsed?.reports) ? parsed.reports : [];
+        const sanitized = sourceReports
+          .map((record) => sanitizeRecord(record, fallbackContext))
+          .filter(Boolean)
+          .slice(0, 50);
+        const consolidated = consolidateCompanyReports(sanitized);
+        return {
+          model: modelName,
+          consolidated,
+          parsed: parsed && typeof parsed === "object" ? parsed : {}
+        };
+      } finally {
+        clearTimeout(timeout);
+      }
     }
+
+    const modelSequence = primaryModel === fallbackModel ? [primaryModel] : [primaryModel, fallbackModel];
+    const modelErrors = [];
+    let lastParsed = {};
+
+    for (const modelName of modelSequence) {
+      try {
+        const attempt = await runModel(modelName);
+        lastParsed = attempt.parsed;
+        if (attempt.consolidated.length > 0) {
+          return {
+            source: `openai:${attempt.model}`,
+            reports: attempt.consolidated,
+            rawResponse: attempt.parsed
+          };
+        }
+        modelErrors.push(`${modelName}: empty_response`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "openai_request_failed";
+        modelErrors.push(`${modelName}: ${message}`);
+      }
+    }
+
+    const fallbackReason =
+      modelErrors.length > 0 ? modelErrors.join(" | ") : "openai_empty_response";
+    const fallbackLabel = modelErrors.some((entry) => !entry.includes("empty_response"))
+      ? "heuristic:openai_failed"
+      : "heuristic:empty_openai";
+    return {
+      source: `${fallbackLabel}:${primaryModel}:${fallbackModel}`,
+      reports: buildHeuristicReports(emailRecord, fallbackContext),
+      rawResponse: {
+        fallback: true,
+        reason: fallbackReason,
+        lastParsed
+      }
+    };
   }
 
   return {
     enabled: enabled && Boolean(apiKey),
-    model,
-    source: enabled && apiKey ? `openai:${model}` : "disabled",
+    model: primaryModel,
+    fallbackModel,
+    source: enabled && apiKey ? `openai:${primaryModel}` : "disabled",
     extractEmailToCompanies
   };
 }
