@@ -363,6 +363,28 @@ export async function createExtractionOrchestrator(options) {
             ? null
             : findSemanticDuplicate(db.extractedReports, report);
 
+          if (existingCanonical && run.options.includeAlreadyExtracted) {
+            existingCanonical.runId = run.id;
+            existingCanonical.archiveId = report.archiveId || existingCanonical.archiveId;
+            existingCanonical.broker = report.broker || existingCanonical.broker;
+            existingCanonical.companyCanonical = report.companyCanonical || existingCanonical.companyCanonical;
+            existingCanonical.companyRaw = report.companyRaw || existingCanonical.companyRaw;
+            existingCanonical.reportType = report.reportType || existingCanonical.reportType;
+            existingCanonical.title = report.title || existingCanonical.title;
+            existingCanonical.summary = report.summary || existingCanonical.summary;
+            existingCanonical.keyPoints =
+              Array.isArray(report.keyPoints) && report.keyPoints.length > 0
+                ? report.keyPoints
+                : existingCanonical.keyPoints;
+            existingCanonical.confidence =
+              Number.isFinite(Number(report.confidence)) ? Number(report.confidence) : existingCanonical.confidence;
+            existingCanonical.publishedAt = report.publishedAt || existingCanonical.publishedAt;
+            existingCanonical.updatedAt = processingAt;
+            run.stats.extractedReports += 1;
+            await persistState();
+            continue;
+          }
+
           if (existingCanonical || semanticDuplicate) {
             const canonical = existingCanonical ?? semanticDuplicate;
             report.duplicateOfReportId = canonical.id;
