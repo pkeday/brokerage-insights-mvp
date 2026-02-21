@@ -613,11 +613,13 @@ function bindEvents() {
 
       const summary = response.summary;
       const companyPipeline = response.companyUpdatePipeline || {};
+      const ingestDebug = response.ingestDebug || {};
       const fetchedCount = Number(summary.fetchedMessages || 0);
       const archivedCount = Number(summary.archivedCount || 0);
       const skippedCount = Number(summary.skippedCount || 0);
       const alreadyArchivedCount = Number(summary.alreadyArchivedCount || 0);
       const pagesScanned = Number(summary.pagesScanned || 0);
+      const reprocessedArchivedCount = Number(ingestDebug.reprocessedArchivedCount || 0);
       const extractedCount = Number(companyPipeline.extractedCompanyUpdates || 0);
       const duplicatesMarked = Number(companyPipeline.duplicatesMarked || 0);
       const aiFailures = Number(companyPipeline.aiFailedEmails || 0);
@@ -632,12 +634,17 @@ function bindEvents() {
         );
       } else {
         setPipelineMessage(
-          `Ingest complete: fetched ${fetchedCount} (pages ${pagesScanned}), archived ${archivedCount}, skipped ${skippedCount} (already archived ${alreadyArchivedCount}), extracted ${extractedCount}, duplicates marked ${duplicatesMarked}, AI failures ${aiFailures}.`
+          `Ingest complete: fetched ${fetchedCount} (pages ${pagesScanned}), archived ${archivedCount}, skipped ${skippedCount} (already archived ${alreadyArchivedCount}), reprocessed archived ${reprocessedArchivedCount}, extracted ${extractedCount}, duplicates marked ${duplicatesMarked}, AI failures ${aiFailures}.`
         );
       }
       if (fetchedCount > 0 && archivedCount === 0 && alreadyArchivedCount === fetchedCount) {
         setPipelineMessage(
           `Ingest scanned ${fetchedCount} messages but all were already archived. Change date range/labels, or use Reset ingest + extraction if you want a fresh re-import.`
+        );
+      }
+      if (fetchedCount === 0 && reprocessedArchivedCount > 0) {
+        setPipelineMessage(
+          `No new Gmail messages found, but reprocessed ${reprocessedArchivedCount} archived emails for AI extraction.`
         );
       }
       if (companyPipelineError) {

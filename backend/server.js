@@ -539,6 +539,71 @@ async function upsertIngestedEmailRecord(user, item) {
   return result.rows[0] || null;
 }
 
+function toPipelineArchiveItem(record) {
+  const archive = record && typeof record === "object" ? record : {};
+  return {
+    id: String(archive.id ?? ""),
+    gmailMessageId: String(archive.gmailMessageId ?? ""),
+    gmailThreadId: String(archive.gmailThreadId ?? ""),
+    broker: String(archive.broker ?? "Unmapped Broker"),
+    from: String(archive.from ?? ""),
+    subject: String(archive.subject ?? ""),
+    snippet: String(archive.snippet ?? ""),
+    bodyPreview: String(archive.bodyPreview ?? ""),
+    dateHeader: String(archive.dateHeader ?? ""),
+    ingestedAt: String(archive.ingestedAt ?? ""),
+    attachments: Array.isArray(archive.attachments)
+      ? archive.attachments.map((entry) => ({
+          filename: String(entry?.filename ?? ""),
+          mimeType: String(entry?.mimeType ?? ""),
+          sizeBytes: Number(entry?.sizeBytes ?? 0)
+        }))
+      : [],
+    gmailMessageUrl: String(archive.gmailMessageUrl ?? ""),
+    duplicateOfArchiveId: archive.duplicateOfArchiveId ?? null
+  };
+}
+
+async function filterRecordsNeedingCompanyPipeline(userId, records, limit = 25) {
+  const rows = Array.isArray(records) ? records.filter(Boolean) : [];
+  if (rows.length === 0) {
+    return [];
+  }
+
+  const cap = Math.max(1, Math.min(200, Number(limit) || 25));
+  if (!isDatabaseEnabled()) {
+    return rows.slice(0, cap);
+  }
+
+  const messageIds = [...new Set(rows.map((entry) => normalizeText(entry.gmailMessageId)).filter(Boolean))];
+  if (messageIds.length === 0) {
+    return rows.slice(0, cap);
+  }
+
+  const statusQuery = await executePipelineDbQuery(
+    `SELECT gmail_message_id, ai_status
+       FROM ${ingestedEmailsTable}
+      WHERE user_id = $1
+        AND gmail_message_id = ANY($2::text[])`,
+    [userId, messageIds]
+  );
+
+  const statusMap = new Map(
+    (statusQuery.rows || []).map((entry) => [normalizeText(entry.gmail_message_id), normalizeText(entry.ai_status).toLowerCase()])
+  );
+
+  return rows
+    .filter((entry) => {
+      const id = normalizeText(entry.gmailMessageId);
+      if (!id) {
+        return false;
+      }
+      const status = statusMap.get(id) || "";
+      return status !== "completed";
+    })
+    .slice(0, cap);
+}
+
 async function setIngestedEmailAiStatus(userId, emailRecordId, status, errorMessage = null) {
   await executePipelineDbQuery(
     `UPDATE ${ingestedEmailsTable}
@@ -2521,6 +2586,51 @@ async function handleGmailIngest(req, res, auth) {
     ingestToDate: body.ingestToDate
   });
 
+  let reprocessedArchivedCount = 0;
+  const archivedForPipelineCandidates = [];
+  for (const item of ingest.items) {
+    archivedForPipelineCandidates.push(item);
+  }
+  if (archivedForPipelineCandidates.length === 0 && Number(ingest.summary.alreadyArchivedCount || 0) > 0) {
+    const reprocessArchived = body.reprocessArchived !== false;
+    if (reprocessArchived) {
+      const trackedBrokers = new Set(
+        sanitizeLabelList(prefs.trackedLabelNames).map((value) => normalizeText(value)).filter(Boolean)
+      );
+      const fromEpoch = dateOnlyToEpochStart(ingest.summary.ingestFromDate);
+      const toEpochExclusive = dateOnlyToEpochEndExclusive(ingest.summary.ingestToDate);
+      const fallbackLimitRaw = Number.parseInt(String(body.reprocessArchivedLimit ?? "25"), 10);
+      const fallbackLimit = Number.isFinite(fallbackLimitRaw) ? Math.max(1, Math.min(100, fallbackLimitRaw)) : 25;
+
+      const archivedCandidates = db.emailArchives
+        .filter((entry) => entry.userId === auth.user.id)
+        .filter((entry) => {
+          if (trackedBrokers.size === 0) {
+            return true;
+          }
+          return trackedBrokers.has(normalizeText(entry.broker));
+        })
+        .filter((entry) => {
+          const internalEpoch = Math.floor(Number(entry.internalDateMs ?? 0) / 1000);
+          if (Number.isFinite(fromEpoch) && internalEpoch < fromEpoch) {
+            return false;
+          }
+          if (Number.isFinite(toEpochExclusive) && internalEpoch >= toEpochExclusive) {
+            return false;
+          }
+          return true;
+        })
+        .sort((left, right) => Number(right.internalDateMs ?? 0) - Number(left.internalDateMs ?? 0))
+        .map((entry) => toPipelineArchiveItem(entry));
+
+      const needsPipeline = await filterRecordsNeedingCompanyPipeline(auth.user.id, archivedCandidates, fallbackLimit);
+      for (const item of needsPipeline) {
+        archivedForPipelineCandidates.push(item);
+      }
+      reprocessedArchivedCount = needsPipeline.length;
+    }
+  }
+
   let companyUpdatePipeline = {
     ingestedEmails: 0,
     aiProcessedEmails: 0,
@@ -2532,7 +2642,7 @@ async function handleGmailIngest(req, res, auth) {
   };
   try {
     const ingestedRecords = [];
-    for (const item of ingest.items) {
+    for (const item of archivedForPipelineCandidates) {
       const row = await upsertIngestedEmailRecord(auth.user, item);
       if (row) {
         ingestedRecords.push(row);
@@ -2555,7 +2665,10 @@ async function handleGmailIngest(req, res, auth) {
       run: null,
       error: null
     },
-    companyUpdatePipeline
+    companyUpdatePipeline,
+    ingestDebug: {
+      reprocessedArchivedCount
+    }
   });
 }
 
