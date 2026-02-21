@@ -623,7 +623,6 @@ function bindEvents() {
       const extractedCount = Number(companyPipeline.extractedCompanyUpdates || 0);
       const duplicatesMarked = Number(companyPipeline.duplicatesMarked || 0);
       const aiFailures = Number(companyPipeline.aiFailedEmails || 0);
-      const aiFallbackEmails = Number(companyPipeline.aiFallbackEmails || 0);
       const aiFailureSamples = Array.isArray(companyPipeline.aiFailureSamples) ? companyPipeline.aiFailureSamples : [];
       const companyPipelineError = String(companyPipeline.error || "").trim();
       const cursorAfter = Number(summary.cursorAfterEpoch || 0);
@@ -636,7 +635,7 @@ function bindEvents() {
         );
       } else {
         setPipelineMessage(
-          `Ingest complete: fetched ${fetchedCount} (pages ${pagesScanned}), archived ${archivedCount}, skipped ${skippedCount} (already archived ${alreadyArchivedCount}), reprocessed archived ${reprocessedArchivedCount}, extracted ${extractedCount}, duplicates marked ${duplicatesMarked}, fallback ${aiFallbackEmails}, AI failures ${aiFailures}.`
+          `Ingest complete: fetched ${fetchedCount} (pages ${pagesScanned}), archived ${archivedCount}, skipped ${skippedCount} (already archived ${alreadyArchivedCount}), reprocessed archived ${reprocessedArchivedCount}, extracted ${extractedCount}, duplicates marked ${duplicatesMarked}, AI failures ${aiFailures}.`
         );
       }
       if (fetchedCount > 0 && archivedCount === 0 && alreadyArchivedCount === fetchedCount) {

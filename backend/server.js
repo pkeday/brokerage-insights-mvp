@@ -755,7 +755,6 @@ async function runCompanyUpdatePipelineForIngestedRecords(user, ingestedRecords)
       ingestedEmails: 0,
       aiProcessedEmails: 0,
       aiFailedEmails: 0,
-      aiFallbackEmails: 0,
       aiFailureSamples: [],
       extractedCompanyUpdates: 0,
       duplicatesMarked: 0,
@@ -773,7 +772,6 @@ async function runCompanyUpdatePipelineForIngestedRecords(user, ingestedRecords)
 
   let aiProcessedEmails = 0;
   let aiFailedEmails = 0;
-  let aiFallbackEmails = 0;
   let extractedCompanyUpdates = 0;
   const aiFailureSamples = [];
 
@@ -800,9 +798,6 @@ async function runCompanyUpdatePipelineForIngestedRecords(user, ingestedRecords)
         ? extraction.reports.map((entry) => ({ ...entry, broker: emailRecord.broker }))
         : [];
       const extractionSource = normalizeText(extraction?.source || companyUpdateExtractor.source);
-      if (extractionSource.toLowerCase().startsWith("heuristic:")) {
-        aiFallbackEmails += 1;
-      }
       const replaceResult = await replaceCompanyUpdatesForEmail(
         user.id,
         emailRecord,
@@ -839,7 +834,6 @@ async function runCompanyUpdatePipelineForIngestedRecords(user, ingestedRecords)
     ingestedEmails: rows.length,
     aiProcessedEmails,
     aiFailedEmails,
-    aiFallbackEmails,
     aiFailureSamples,
     extractedCompanyUpdates,
     duplicatesMarked: dedupeSummary.markedDuplicates,
@@ -2489,7 +2483,6 @@ async function runScheduledIngests(trigger = "scheduled") {
   let archivedCount = 0;
   let aiProcessedEmails = 0;
   let aiFailedEmails = 0;
-  let aiFallbackEmails = 0;
   let extractedCompanyUpdates = 0;
   let dedupeMarkedDuplicates = 0;
 
@@ -2522,7 +2515,6 @@ async function runScheduledIngests(trigger = "scheduled") {
         ingestedEmails: 0,
         aiProcessedEmails: 0,
         aiFailedEmails: 0,
-        aiFallbackEmails: 0,
         aiFailureSamples: [],
         extractedCompanyUpdates: 0,
         duplicatesMarked: 0,
@@ -2547,7 +2539,6 @@ async function runScheduledIngests(trigger = "scheduled") {
       archivedCount += ingest.summary.archivedCount;
       aiProcessedEmails += Number(companyPipeline.aiProcessedEmails || 0);
       aiFailedEmails += Number(companyPipeline.aiFailedEmails || 0);
-      aiFallbackEmails += Number(companyPipeline.aiFallbackEmails || 0);
       extractedCompanyUpdates += Number(companyPipeline.extractedCompanyUpdates || 0);
       dedupeMarkedDuplicates += Number(companyPipeline.duplicatesMarked || 0);
       details.push({
@@ -2579,7 +2570,6 @@ async function runScheduledIngests(trigger = "scheduled") {
     archivedCount,
     aiProcessedEmails,
     aiFailedEmails,
-    aiFallbackEmails,
     extractedCompanyUpdates,
     dedupeMarkedDuplicates,
     details
@@ -2657,7 +2647,6 @@ async function handleGmailIngest(req, res, auth) {
     ingestedEmails: 0,
     aiProcessedEmails: 0,
     aiFailedEmails: 0,
-    aiFallbackEmails: 0,
     aiFailureSamples: [],
     extractedCompanyUpdates: 0,
     duplicatesMarked: 0,

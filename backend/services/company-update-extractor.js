@@ -37,31 +37,8 @@ const DEFAULT_ALLOWED_REPORT_TYPES = new Set([
 const SUMMARY_MAX_LENGTH = 320;
 const TITLE_MAX_LENGTH = 220;
 const KEY_INSIGHT_MAX_LENGTH = 180;
-const HEURISTIC_CONFIDENCE = 0.2;
 const OPENAI_BASE_URL = "https://api.openai.com/v1";
 const OPENAI_PRIMARY_MODEL = "gpt-5-mini";
-const OPENAI_FALLBACK_MODEL = "gpt-5-nano";
-
-const GENERIC_SUBJECT_TOKENS = new Set([
-  "report",
-  "reports",
-  "update",
-  "updates",
-  "results",
-  "result",
-  "initiation",
-  "initiating",
-  "coverage",
-  "sector",
-  "universe",
-  "note",
-  "research",
-  "morning",
-  "daily",
-  "weekly",
-  "flash",
-  "preview"
-]);
 
 function parseResponseText(payload) {
   if (!payload || typeof payload !== "object") {
@@ -341,218 +318,6 @@ function consolidateCompanyReports(records) {
   return Array.from(map.values()).slice(0, 25);
 }
 
-function splitSentences(value) {
-  return normalizeWhitespace(value)
-    .split(/(?<=[.!?])\s+|\n+/)
-    .map((entry) => normalizeWhitespace(entry))
-    .filter((entry) => entry.length >= 20);
-}
-
-function sentenceScore(value) {
-  const text = normalizeWhitespace(value).toLowerCase();
-  if (!text) {
-    return 0;
-  }
-
-  let score = 0;
-  const weightedKeywords = [
-    ["ebitda", 3],
-    ["revenue", 3],
-    ["margin", 3],
-    ["guidance", 2],
-    ["valuation", 2],
-    ["target", 2],
-    ["tp", 2],
-    ["buy", 2],
-    ["sell", 2],
-    ["hold", 2],
-    ["add", 2],
-    ["reduce", 2],
-    ["upgrade", 2],
-    ["downgrade", 2],
-    ["outperform", 2],
-    ["underperform", 2],
-    ["volume", 1],
-    ["cost", 1],
-    ["capex", 1],
-    ["eps", 1]
-  ];
-  for (const [keyword, points] of weightedKeywords) {
-    if (text.includes(keyword)) {
-      score += points;
-    }
-  }
-
-  if (/\b\d+(\.\d+)?%?\b/.test(text)) {
-    score += 1;
-  }
-  if (text.length > 180) {
-    score -= 1;
-  }
-  if (/unsubscribe|click here|http[s]?:\/\//.test(text)) {
-    score -= 3;
-  }
-  return score;
-}
-
-function normalizeSubject(value) {
-  return normalizeWhitespace(String(value ?? "").replace(/^(fw|fwd|re)\s*:\s*/i, ""));
-}
-
-function extractSectorName(subject) {
-  const normalized = normalizeSubject(subject);
-  if (!normalized) {
-    return "";
-  }
-
-  const leadingMatch = normalized.match(/^([A-Za-z][A-Za-z&/\-\s]{2,60})\s+sector\b/i);
-  if (leadingMatch) {
-    return normalizeWhitespace(leadingMatch[1]);
-  }
-
-  if (/sector|industry/i.test(normalized)) {
-    const cleaned = normalized
-      .replace(/\b(sector|industry)\b/gi, "")
-      .replace(/\b(update|report|note|coverage|results?)\b/gi, "")
-      .trim();
-    return normalizeWhitespace(cleaned.split(/[-|:]/)[0]).slice(0, 60);
-  }
-
-  return "";
-}
-
-function guessCompaniesFromSubject(subject) {
-  const normalized = normalizeSubject(subject);
-  if (!normalized) {
-    return [];
-  }
-
-  let head = normalized;
-  for (const separator of ["|", " - ", " – ", ":"]) {
-    if (head.includes(separator)) {
-      head = head.split(separator)[0];
-      break;
-    }
-  }
-
-  const segments = head
-    .split(/,|\/|&|\band\b/gi)
-    .map((entry) => normalizeWhitespace(entry))
-    .map((entry) =>
-      normalizeWhitespace(
-        entry
-          .split(" ")
-          .filter((token) => !GENERIC_SUBJECT_TOKENS.has(token.toLowerCase()))
-          .join(" ")
-      )
-    )
-    .filter((entry) => entry.length >= 3 && entry.length <= 80);
-
-  return uniqueStrings(segments, 5);
-}
-
-function buildHeuristicSummary(emailRecord, context) {
-  const source = redactForPipeline(
-    [
-      normalizeSubject(emailRecord.subject),
-      normalizeWhitespace(emailRecord.bodyPreview),
-      normalizeWhitespace(emailRecord.snippet)
-    ]
-      .filter(Boolean)
-      .join(". "),
-    context
-  );
-
-  const sentences = splitSentences(source)
-    .map((entry) => ({ text: entry, score: sentenceScore(entry) }))
-    .sort((left, right) => right.score - left.score);
-
-  const topSentences = uniqueStrings(
-    sentences.filter((entry) => entry.score >= 1).map((entry) => truncateText(entry.text, KEY_INSIGHT_MAX_LENGTH)),
-    3
-  );
-
-  const summaryText = topSentences.slice(0, 2).join(" ") || truncateText(source, SUMMARY_MAX_LENGTH) || "No summary available.";
-  return {
-    summary: truncateText(summaryText, SUMMARY_MAX_LENGTH),
-    keyInsights: topSentences.length > 0 ? topSentences : [truncateText(summaryText, KEY_INSIGHT_MAX_LENGTH)]
-  };
-}
-
-function buildHeuristicReports(emailRecord, context) {
-  const subject = normalizeSubject(emailRecord.subject);
-  const body = normalizeWhitespace(emailRecord.bodyPreview || emailRecord.snippet || "");
-  const reportType = normalizeReportType(`${subject} ${body}`);
-  const decision = normalizeDecision(`${subject} ${body}`);
-  const publishedAt = normalizeIsoDate(emailRecord.messageDate || emailRecord.ingestedAt) || context.defaultPublishedAt;
-  const { summary, keyInsights } = buildHeuristicSummary(emailRecord, context);
-  const title = truncateText(redactForPipeline(subject || "Brokerage update", context), TITLE_MAX_LENGTH) || "Brokerage update";
-
-  const companyCandidates = guessCompaniesFromSubject(subject);
-  if (companyCandidates.length > 0) {
-    return companyCandidates.map((companyRaw) => {
-      const companyCanonical = canonicalizeCompanyName(companyRaw) || companyRaw;
-      return {
-        companyRaw,
-        companyCanonical,
-        reportType,
-        title,
-        summary,
-        keyInsights,
-        decision,
-        confidence: HEURISTIC_CONFIDENCE,
-        publishedAt,
-        sectorName: "",
-        sourcePayload: {
-          fallback: true,
-          method: "heuristic_subject_parse"
-        }
-      };
-    });
-  }
-
-  const sectorName = extractSectorName(subject);
-  if (sectorName) {
-    return [
-      {
-        companyRaw: sectorName,
-        companyCanonical: `SECTOR:${sectorName}`,
-        reportType: reportType === "other" ? "sector_update" : reportType,
-        title,
-        summary,
-        keyInsights,
-        decision,
-        confidence: HEURISTIC_CONFIDENCE,
-        publishedAt,
-        sectorName,
-        sourcePayload: {
-          fallback: true,
-          method: "heuristic_sector_parse"
-        }
-      }
-    ];
-  }
-
-  return [
-    {
-      companyRaw: "Unknown Company",
-      companyCanonical: "Unknown Company",
-      reportType,
-      title,
-      summary,
-      keyInsights,
-      decision,
-      confidence: HEURISTIC_CONFIDENCE,
-      publishedAt,
-      sectorName: "",
-      sourcePayload: {
-        fallback: true,
-        method: "heuristic_default"
-      }
-    }
-  ];
-}
-
 function buildSourceText(emailRecord) {
   const sections = [
     `Subject: ${normalizeWhitespace(emailRecord.subject)}`,
@@ -577,8 +342,7 @@ function buildDictionaryContext(companyDictionary) {
 export function createCompanyUpdateExtractor(options = {}) {
   const apiKey = normalizeWhitespace(options.apiKey || process.env.OPENAI_API_KEY);
   const enabled = options.enabled !== false;
-  const primaryModel = normalizeWhitespace(options.modelPrimary || options.model || OPENAI_PRIMARY_MODEL);
-  const fallbackModel = normalizeWhitespace(options.modelFallback || OPENAI_FALLBACK_MODEL);
+  const model = normalizeWhitespace(options.model || OPENAI_PRIMARY_MODEL);
   const baseUrl = normalizeWhitespace(options.baseUrl || OPENAI_BASE_URL);
   const timeoutMsRaw = Number.parseInt(String(options.timeoutMs || "18000"), 10);
   const timeoutMs = Number.isFinite(timeoutMsRaw) ? Math.max(4000, Math.min(timeoutMsRaw, 45_000)) : 18_000;
@@ -589,31 +353,34 @@ export function createCompanyUpdateExtractor(options = {}) {
     const senderIdentity = parseSenderIdentity(emailRecord.sender);
     const dictionaryContext = buildDictionaryContext(params.companyDictionary);
     const sourceText = buildSourceText(emailRecord);
-    const fallbackContext = { defaultPublishedAt, ...senderIdentity };
+    const extractionContext = { defaultPublishedAt, ...senderIdentity };
 
     if (!enabled || !apiKey) {
-      return {
-        source: "heuristic:missing_openai_key",
-        reports: buildHeuristicReports(emailRecord, fallbackContext),
-        rawResponse: {
-          fallback: true,
-          reason: "missing_openai_key"
-        }
-      };
+      throw new Error("OPENAI_API_KEY is missing. AI extraction is required and fallback is disabled.");
     }
 
-    const buildModelRequestBody = (modelName) => ({
-      model: modelName,
-      temperature: 0.1,
-      max_output_tokens: 1800,
-      input: [
-        {
-          role: "system",
-          content: "You extract brokerage email insights for expert users. Keep broker perspective distinct. Return strict JSON only."
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(`${baseUrl}/responses`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json"
         },
-        {
-          role: "user",
-          content: `Extract all company-wise updates from this ONE brokerage email.
+        body: JSON.stringify({
+          model,
+          temperature: 0.1,
+          max_output_tokens: 1800,
+          input: [
+            {
+              role: "system",
+              content: "You extract brokerage email insights for expert users. Keep broker perspective distinct. Return strict JSON only."
+            },
+            {
+              role: "user",
+              content: `Extract all company-wise updates from this ONE brokerage email.
 Return strict JSON with shape:
 {"reports":[{"companyRaw":string,"companyCanonical":string,"sectorName":string,"reportType":string,"title":string,"summary":string,"keyInsights":string[],"decision":string,"confidence":number,"publishedAt":string}]}
 Rules:
@@ -630,91 +397,48 @@ ArchiveId: ${normalizeWhitespace(emailRecord.archiveId)}
 Canonical Company Dictionary: ${dictionaryContext}
 Email Content:
 ${sourceText}`
-        }
-      ]
-    });
+            }
+          ]
+        }),
+        signal: controller.signal
+      });
 
-    async function runModel(modelName) {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), timeoutMs);
-      try {
-        const response = await fetch(`${baseUrl}/responses`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(buildModelRequestBody(modelName)),
-          signal: controller.signal
-        });
-
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          const message = normalizeWhitespace(payload?.error?.message || payload?.error || `HTTP ${response.status}`);
-          throw new Error(`OpenAI extraction failed: ${message}`);
-        }
-
-        const responseText = parseResponseText(payload);
-        const parsed = parseJsonObject(responseText);
-        const sourceReports = Array.isArray(parsed?.reports) ? parsed.reports : [];
-        const sanitized = sourceReports
-          .map((record) => sanitizeRecord(record, fallbackContext))
-          .filter(Boolean)
-          .slice(0, 50);
-        const consolidated = consolidateCompanyReports(sanitized);
-        return {
-          model: modelName,
-          consolidated,
-          parsed: parsed && typeof parsed === "object" ? parsed : {}
-        };
-      } finally {
-        clearTimeout(timeout);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const message = normalizeWhitespace(payload?.error?.message || payload?.error || `HTTP ${response.status}`);
+        throw new Error(`OpenAI extraction failed: ${message}`);
       }
+
+      const responseText = parseResponseText(payload);
+      const parsed = parseJsonObject(responseText);
+      if (!parsed || !Array.isArray(parsed.reports)) {
+        throw new Error("OpenAI extraction returned invalid JSON payload.");
+      }
+
+      const sanitized = parsed.reports
+        .map((record) => sanitizeRecord(record, extractionContext))
+        .filter(Boolean)
+        .slice(0, 50);
+      const consolidated = consolidateCompanyReports(sanitized);
+
+      if (consolidated.length === 0) {
+        throw new Error("OpenAI extraction returned zero company reports.");
+      }
+
+      return {
+        source: `openai:${model}`,
+        reports: consolidated,
+        rawResponse: parsed && typeof parsed === "object" ? parsed : {}
+      };
+    } finally {
+      clearTimeout(timeout);
     }
-
-    const modelSequence = primaryModel === fallbackModel ? [primaryModel] : [primaryModel, fallbackModel];
-    const modelErrors = [];
-    let lastParsed = {};
-
-    for (const modelName of modelSequence) {
-      try {
-        const attempt = await runModel(modelName);
-        lastParsed = attempt.parsed;
-        if (attempt.consolidated.length > 0) {
-          return {
-            source: `openai:${attempt.model}`,
-            reports: attempt.consolidated,
-            rawResponse: attempt.parsed
-          };
-        }
-        modelErrors.push(`${modelName}: empty_response`);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "openai_request_failed";
-        modelErrors.push(`${modelName}: ${message}`);
-      }
-    }
-
-    const fallbackReason =
-      modelErrors.length > 0 ? modelErrors.join(" | ") : "openai_empty_response";
-    const fallbackLabel = modelErrors.some((entry) => !entry.includes("empty_response"))
-      ? "heuristic:openai_failed"
-      : "heuristic:empty_openai";
-    return {
-      source: `${fallbackLabel}:${primaryModel}:${fallbackModel}`,
-      reports: buildHeuristicReports(emailRecord, fallbackContext),
-      rawResponse: {
-        fallback: true,
-        reason: fallbackReason,
-        lastParsed
-      }
-    };
   }
 
   return {
     enabled: enabled && Boolean(apiKey),
-    model: primaryModel,
-    fallbackModel,
-    source: enabled && apiKey ? `openai:${primaryModel}` : "disabled",
+    model,
+    source: enabled && apiKey ? `openai:${model}` : "disabled",
     extractEmailToCompanies
   };
 }
