@@ -561,13 +561,14 @@ function toPipelineArchiveItem(record) {
   };
 }
 
-async function filterRecordsNeedingCompanyPipeline(userId, records, limit = 25) {
+async function filterRecordsNeedingCompanyPipeline(userId, records, options = {}) {
   const rows = Array.isArray(records) ? records.filter(Boolean) : [];
   if (rows.length === 0) {
     return [];
   }
 
-  const cap = Math.max(1, Math.min(200, Number(limit) || 25));
+  const cap = Math.max(1, Math.min(200, Number(options.limit) || 25));
+  const includeCompleted = options.includeCompleted === true;
   if (!isDatabaseEnabled()) {
     return rows.slice(0, cap);
   }
@@ -596,7 +597,7 @@ async function filterRecordsNeedingCompanyPipeline(userId, records, limit = 25) 
         return false;
       }
       const status = statusMap.get(id) || "";
-      return status !== "completed";
+      return includeCompleted ? true : status !== "completed";
     })
     .slice(0, cap);
 }
@@ -662,7 +663,7 @@ async function replaceCompanyUpdatesForEmail(userId, emailRecord, extractedRecor
 }
 
 async function runCompanyUpdatesDedupeForUser(userId) {
-  const dedupeWindowDays = 21;
+  const dedupeWindowDays = 14;
   const query = await executePipelineDbQuery(
     `SELECT id, broker, company_canonical, report_type, summary, published_at, created_at
        FROM ${companyUpdatesTable}
@@ -704,13 +705,21 @@ async function runCompanyUpdatesDedupeForUser(userId) {
         continue;
       }
 
-      const score = jaccardSimilarity(row.summary, candidate.summary);
       const sameType = normalizeText(row.report_type).toLowerCase() === normalizeText(candidate.report_type).toLowerCase();
-      const isDuplicate = (sameType && score >= 0.74) || score >= 0.84;
+      if (!sameType) {
+        continue;
+      }
+
+      const rowSummary = normalizeText(row.summary);
+      const candidateSummary = normalizeText(candidate.summary);
+      const shortestSummary = Math.min(rowSummary.length, candidateSummary.length);
+      const score = jaccardSimilarity(rowSummary, candidateSummary);
+      const requiredScore = shortestSummary < 120 ? 0.9 : 0.82;
+      const isDuplicate = score >= requiredScore;
       if (isDuplicate) {
         duplicateOf = candidate.id;
         duplicateScore = score;
-        duplicateReason = sameType ? "similar_update_same_type" : "semantic_overlap";
+        duplicateReason = shortestSummary < 120 ? "similar_update_same_type_short_text" : "similar_update_same_type";
         break;
       }
     }
@@ -2613,6 +2622,7 @@ async function handleGmailIngest(req, res, auth) {
       const toEpochExclusive = dateOnlyToEpochEndExclusive(ingest.summary.ingestToDate);
       const fallbackLimitRaw = Number.parseInt(String(body.reprocessArchivedLimit ?? "25"), 10);
       const fallbackLimit = Number.isFinite(fallbackLimitRaw) ? Math.max(1, Math.min(100, fallbackLimitRaw)) : 25;
+      const reprocessCompleted = body.reprocessCompleted === true;
 
       const archivedCandidates = db.emailArchives
         .filter((entry) => entry.userId === auth.user.id)
@@ -2635,7 +2645,10 @@ async function handleGmailIngest(req, res, auth) {
         .sort((left, right) => Number(right.internalDateMs ?? 0) - Number(left.internalDateMs ?? 0))
         .map((entry) => toPipelineArchiveItem(entry));
 
-      const needsPipeline = await filterRecordsNeedingCompanyPipeline(auth.user.id, archivedCandidates, fallbackLimit);
+      const needsPipeline = await filterRecordsNeedingCompanyPipeline(auth.user.id, archivedCandidates, {
+        limit: fallbackLimit,
+        includeCompleted: reprocessCompleted
+      });
       for (const item of needsPipeline) {
         archivedForPipelineCandidates.push(item);
       }

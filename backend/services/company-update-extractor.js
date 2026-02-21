@@ -39,6 +39,28 @@ const TITLE_MAX_LENGTH = 220;
 const KEY_INSIGHT_MAX_LENGTH = 180;
 const OPENAI_BASE_URL = "https://api.openai.com/v1";
 const OPENAI_PRIMARY_MODEL = "gpt-5-mini";
+const RECAP_SECTION_MARKERS = [
+  "latest releases",
+  "latest release",
+  "recent releases",
+  "other reports",
+  "other updates",
+  "also read",
+  "more from research desk",
+  "morning post",
+  "top picks today"
+];
+const DISCLAIMER_SECTION_MARKERS = [
+  "analyst certification",
+  "important disclosures",
+  "disclaimer:",
+  "this e-mail",
+  "this email",
+  "confidentiality notice",
+  "all rights reserved",
+  "registered office",
+  "unsubscribe"
+];
 
 function parseResponseText(payload) {
   if (!payload || typeof payload !== "object") {
@@ -318,14 +340,72 @@ function consolidateCompanyReports(records) {
   return Array.from(map.values()).slice(0, 25);
 }
 
+function findFirstMarkerIndex(text, markers, minPrefixLength = 0) {
+  const source = normalizeWhitespace(text).toLowerCase();
+  if (!source) {
+    return -1;
+  }
+
+  let best = -1;
+  for (const marker of markers) {
+    const normalizedMarker = normalizeWhitespace(marker).toLowerCase();
+    if (!normalizedMarker) {
+      continue;
+    }
+    const index = source.indexOf(normalizedMarker);
+    if (index >= minPrefixLength && (best === -1 || index < best)) {
+      best = index;
+    }
+  }
+
+  return best;
+}
+
+function sanitizeSourceNarrative(rawValue) {
+  let text = String(rawValue ?? "");
+  if (!text.trim()) {
+    return "";
+  }
+
+  text = text
+    .replace(/=[0-9A-F]{2}/gi, " ")
+    .replace(/\bhttps?:\/\/\S+\b/gi, " ")
+    .replace(/\bwww\.\S+\b/gi, " ")
+    .replace(/\bid=[^\s|]{8,}\b/gi, " ")
+    .replace(/\b(?:from|to|cc|bcc|sent|subject|reply-to)\s*:[^|]{0,200}/gi, " ")
+    .replace(/\b(?:view in browser|privacy policy|terms and conditions|click here to unsubscribe)\b[^|]{0,220}/gi, " ");
+
+  const recapIndex = findFirstMarkerIndex(text, RECAP_SECTION_MARKERS, 260);
+  if (recapIndex > 0) {
+    text = text.slice(0, recapIndex);
+  }
+
+  const disclaimerIndex = findFirstMarkerIndex(text, DISCLAIMER_SECTION_MARKERS, 200);
+  if (disclaimerIndex > 0) {
+    text = text.slice(0, disclaimerIndex);
+  }
+
+  return normalizeWhitespace(text).slice(0, 7000);
+}
+
 function buildSourceText(emailRecord) {
+  const subject = sanitizeSourceNarrative(emailRecord.subject);
+  const snippet = sanitizeSourceNarrative(emailRecord.snippet);
+  const bodyPreview = sanitizeSourceNarrative(emailRecord.bodyPreview);
+  const attachments = Array.isArray(emailRecord.attachments)
+    ? emailRecord.attachments
+        .map((entry) => sanitizeSourceNarrative(entry?.filename))
+        .filter(Boolean)
+        .join(", ")
+    : "";
+
   const sections = [
-    `Subject: ${normalizeWhitespace(emailRecord.subject)}`,
-    `Snippet: ${normalizeWhitespace(emailRecord.snippet)}`,
-    `BodyPreview: ${normalizeWhitespace(emailRecord.bodyPreview)}`,
-    `Attachments: ${Array.isArray(emailRecord.attachments) ? emailRecord.attachments.map((entry) => entry?.filename).filter(Boolean).join(", ") : ""}`
+    subject ? `Subject: ${subject}` : "",
+    snippet ? `Snippet: ${snippet}` : "",
+    bodyPreview ? `BodyPreview: ${bodyPreview}` : "",
+    attachments ? `Attachments: ${attachments}` : ""
   ];
-  return sections.join("\n").slice(0, 12000);
+  return sections.filter(Boolean).join("\n").slice(0, 10000);
 }
 
 function buildDictionaryContext(companyDictionary) {
@@ -347,6 +427,32 @@ export function createCompanyUpdateExtractor(options = {}) {
   const timeoutMsRaw = Number.parseInt(String(options.timeoutMs || "18000"), 10);
   const timeoutMs = Number.isFinite(timeoutMsRaw) ? Math.max(4000, Math.min(timeoutMsRaw, 45_000)) : 18_000;
 
+  function buildExtractionPrompt({ emailRecord, dictionaryContext, sourceText, repairMode }) {
+    const repairInstruction = repairMode
+      ? "\n- Your previous output was invalid or empty. Re-read and return corrected JSON only."
+      : "";
+
+    return `Extract all company-wise updates from this ONE brokerage email.
+Return strict JSON with shape:
+{"reports":[{"companyRaw":string,"companyCanonical":string,"sectorName":string,"reportType":string,"title":string,"summary":string,"keyInsights":string[],"decision":string,"confidence":number,"publishedAt":string}]}
+Rules:
+- One email may include multiple companies. Return one consolidated object per company (or sector).
+- Ignore recap blocks ("latest releases", "other reports"), legal disclaimers, signatures, unsubscribe, and distribution metadata.
+- Focus on the primary update content and what changed in this email.
+- Allowed reportType: initiating_coverage, results_update, general_update, sector_update, target_price_change, rating_change, management_commentary, corporate_action, other.
+- Decision should map to BUY/SELL/HOLD/ADD/REDUCE/UNKNOWN.
+- summary must be analytical and specific (90-220 chars). Avoid generic wording and avoid copying long source phrases.
+- keyInsights max 3 bullets, each specific and concise.
+- Strip sender/receiver identities and email addresses.
+- If only sector commentary exists, set companyCanonical to SECTOR:<sector>.
+- If no extractable research content exists, return {"reports":[]}.${repairInstruction}
+Broker: ${normalizeWhitespace(emailRecord.broker)}
+ArchiveId: ${normalizeWhitespace(emailRecord.archiveId)}
+Canonical Company Dictionary: ${dictionaryContext}
+Email Content:
+${sourceText}`;
+  }
+
   async function extractEmailToCompanies(params = {}) {
     const emailRecord = params.emailRecord && typeof params.emailRecord === "object" ? params.emailRecord : {};
     const defaultPublishedAt = normalizeIsoDate(emailRecord.messageDate || emailRecord.ingestedAt) || new Date().toISOString();
@@ -363,72 +469,70 @@ export function createCompanyUpdateExtractor(options = {}) {
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const response = await fetch(`${baseUrl}/responses`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model,
-          max_output_tokens: 1800,
-          input: [
-            {
-              role: "system",
-              content: "You extract brokerage email insights for expert users. Keep broker perspective distinct. Return strict JSON only."
-            },
-            {
-              role: "user",
-              content: `Extract all company-wise updates from this ONE brokerage email.
-Return strict JSON with shape:
-{"reports":[{"companyRaw":string,"companyCanonical":string,"sectorName":string,"reportType":string,"title":string,"summary":string,"keyInsights":string[],"decision":string,"confidence":number,"publishedAt":string}]}
-Rules:
-- One email may include multiple companies. Return one consolidated object per company (or sector).
-- Allowed reportType: initiating_coverage, results_update, general_update, sector_update, target_price_change, rating_change, management_commentary, corporate_action, other.
-- Decision should map to BUY/SELL/HOLD/ADD/REDUCE/UNKNOWN.
-- Keep summary nuanced, specific, analytical, and short (max 280 chars). Do NOT copy email body lines verbatim.
-- keyInsights max 3 bullets.
-- Strip sender/receiver identities and email addresses.
-- If only sector commentary exists, set companyCanonical to SECTOR:<sector>.
-- If this email has no research content, return {"reports":[]}.
-Broker: ${normalizeWhitespace(emailRecord.broker)}
-ArchiveId: ${normalizeWhitespace(emailRecord.archiveId)}
-Canonical Company Dictionary: ${dictionaryContext}
-Email Content:
-${sourceText}`
-            }
-          ]
-        }),
-        signal: controller.signal
-      });
+      const attempts = [false, true];
+      let lastErrorMessage = "Unknown extraction failure.";
 
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        const message = normalizeWhitespace(payload?.error?.message || payload?.error || `HTTP ${response.status}`);
-        throw new Error(`OpenAI extraction failed: ${message}`);
+      for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex += 1) {
+        const repairMode = attempts[attemptIndex];
+        const response = await fetch(`${baseUrl}/responses`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            model,
+            max_output_tokens: repairMode ? 2200 : 1800,
+            input: [
+              {
+                role: "system",
+                content:
+                  "You extract brokerage research insights for expert users. Keep broker perspective distinct. Return strict JSON only."
+              },
+              {
+                role: "user",
+                content: buildExtractionPrompt({ emailRecord, dictionaryContext, sourceText, repairMode })
+              }
+            ]
+          }),
+          signal: controller.signal
+        });
+
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const message = normalizeWhitespace(payload?.error?.message || payload?.error || `HTTP ${response.status}`);
+          lastErrorMessage = `OpenAI extraction failed: ${message}`;
+          if (attemptIndex + 1 < attempts.length && (response.status >= 500 || response.status === 429)) {
+            continue;
+          }
+          throw new Error(lastErrorMessage);
+        }
+
+        const responseText = parseResponseText(payload);
+        const parsed = parseJsonObject(responseText);
+        if (!parsed || !Array.isArray(parsed.reports)) {
+          lastErrorMessage = "OpenAI extraction returned invalid JSON payload.";
+          continue;
+        }
+
+        const sanitized = parsed.reports
+          .map((record) => sanitizeRecord(record, extractionContext))
+          .filter(Boolean)
+          .slice(0, 50);
+        const consolidated = consolidateCompanyReports(sanitized);
+        if (consolidated.length === 0) {
+          lastErrorMessage = "OpenAI extraction returned zero company reports.";
+          continue;
+        }
+
+        return {
+          source: `openai:${model}`,
+          reports: consolidated,
+          rawResponse: parsed && typeof parsed === "object" ? parsed : {}
+        };
       }
 
-      const responseText = parseResponseText(payload);
-      const parsed = parseJsonObject(responseText);
-      if (!parsed || !Array.isArray(parsed.reports)) {
-        throw new Error("OpenAI extraction returned invalid JSON payload.");
-      }
-
-      const sanitized = parsed.reports
-        .map((record) => sanitizeRecord(record, extractionContext))
-        .filter(Boolean)
-        .slice(0, 50);
-      const consolidated = consolidateCompanyReports(sanitized);
-
-      if (consolidated.length === 0) {
-        throw new Error("OpenAI extraction returned zero company reports.");
-      }
-
-      return {
-        source: `openai:${model}`,
-        reports: consolidated,
-        rawResponse: parsed && typeof parsed === "object" ? parsed : {}
-      };
+      throw new Error(lastErrorMessage);
     } finally {
       clearTimeout(timeout);
     }

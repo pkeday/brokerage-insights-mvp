@@ -604,10 +604,14 @@ function bindEvents() {
     setPipelineMessage("Running ingest + company extraction...");
 
     try {
+      const reprocessArchivedLimit = Math.max(1, Math.min(100, Number(state.ingestSetup.maxResults || 30)));
       const response = await apiFetch("/api/gmail/ingest", {
         method: "POST",
         body: JSON.stringify({
-          includeAttachments: true
+          includeAttachments: true,
+          reprocessArchived: true,
+          reprocessArchivedLimit,
+          reprocessCompleted: true
         })
       });
 
