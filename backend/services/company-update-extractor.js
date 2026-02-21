@@ -1,6 +1,10 @@
 import { redactPiiText } from "../extraction/pii-redaction.js";
 import { canonicalizeCompanyName } from "../normalization/company.js";
 import { normalizeWhitespace, truncateText, uniqueStrings } from "../normalization/text.js";
+import {
+  COMPANY_UPDATE_SYSTEM_PROMPT,
+  renderCompanyUpdateExtractionPrompt
+} from "../prompts/company-update-extraction-prompt.js";
 
 const REPORT_TYPE_NORMALIZATION_RULES = [
   { value: "initiating_coverage", patterns: ["initiating", "initiation", "coverage initiation", "initiating coverage"] },
@@ -427,32 +431,6 @@ export function createCompanyUpdateExtractor(options = {}) {
   const timeoutMsRaw = Number.parseInt(String(options.timeoutMs || "18000"), 10);
   const timeoutMs = Number.isFinite(timeoutMsRaw) ? Math.max(4000, Math.min(timeoutMsRaw, 45_000)) : 18_000;
 
-  function buildExtractionPrompt({ emailRecord, dictionaryContext, sourceText, repairMode }) {
-    const repairInstruction = repairMode
-      ? "\n- Your previous output was invalid or empty. Re-read and return corrected JSON only."
-      : "";
-
-    return `Extract all company-wise updates from this ONE brokerage email.
-Return strict JSON with shape:
-{"reports":[{"companyRaw":string,"companyCanonical":string,"sectorName":string,"reportType":string,"title":string,"summary":string,"keyInsights":string[],"decision":string,"confidence":number,"publishedAt":string}]}
-Rules:
-- One email may include multiple companies. Return one consolidated object per company (or sector).
-- Ignore recap blocks ("latest releases", "other reports"), legal disclaimers, signatures, unsubscribe, and distribution metadata.
-- Focus on the primary update content and what changed in this email.
-- Allowed reportType: initiating_coverage, results_update, general_update, sector_update, target_price_change, rating_change, management_commentary, corporate_action, other.
-- Decision should map to BUY/SELL/HOLD/ADD/REDUCE/UNKNOWN.
-- summary must be analytical and specific (90-220 chars). Avoid generic wording and avoid copying long source phrases.
-- keyInsights max 3 bullets, each specific and concise.
-- Strip sender/receiver identities and email addresses.
-- If only sector commentary exists, set companyCanonical to SECTOR:<sector>.
-- If no extractable research content exists, return {"reports":[]}.${repairInstruction}
-Broker: ${normalizeWhitespace(emailRecord.broker)}
-ArchiveId: ${normalizeWhitespace(emailRecord.archiveId)}
-Canonical Company Dictionary: ${dictionaryContext}
-Email Content:
-${sourceText}`;
-  }
-
   async function extractEmailToCompanies(params = {}) {
     const emailRecord = params.emailRecord && typeof params.emailRecord === "object" ? params.emailRecord : {};
     const defaultPublishedAt = normalizeIsoDate(emailRecord.messageDate || emailRecord.ingestedAt) || new Date().toISOString();
@@ -486,12 +464,17 @@ ${sourceText}`;
             input: [
               {
                 role: "system",
-                content:
-                  "You extract brokerage research insights for expert users. Keep broker perspective distinct. Return strict JSON only."
+                content: COMPANY_UPDATE_SYSTEM_PROMPT
               },
               {
                 role: "user",
-                content: buildExtractionPrompt({ emailRecord, dictionaryContext, sourceText, repairMode })
+                content: renderCompanyUpdateExtractionPrompt({
+                  broker: emailRecord.broker,
+                  archiveId: emailRecord.archiveId,
+                  dictionaryContext,
+                  sourceText,
+                  repairMode
+                })
               }
             ]
           }),
