@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Brokerage Insights MVP</title>
-    <link rel="stylesheet" href="./style.css?v=20260221-1545" />
+    <link rel="stylesheet" href="./style.css?v=20260221-2030" />
   </head>
   <body>
     <div class="app-shell">
@@ -60,7 +60,7 @@
                 <button id="google-connect-btn" class="btn">Sign in with Google</button>
                 <button id="signout-btn" class="btn">Sign out</button>
                 <button id="ingest-setup-btn" class="btn">Ingest setup</button>
-                <button id="run-ingest-btn" class="btn">Run ingest now</button>
+                <button id="run-ingest-btn" class="btn">Run ingest + summary</button>
                 <button id="send-digest-btn" class="btn primary">Send digest preview</button>
               </div>
             </div>
@@ -113,7 +113,8 @@
 
           <div class="broker-lanes" id="broker-lanes"></div>
 
-          <div class="extraction-workspace">
+          <details class="extraction-workspace extraction-workspace-advanced">
+            <summary>Advanced extraction diagnostics (optional)</summary>
             <article class="panel">
               <header>Extraction Runs</header>
               <div class="panel-body">
@@ -188,7 +189,7 @@
                 </div>
               </div>
             </article>
-          </div>
+          </details>
             </section>
 
             <section id="view-archive" class="view">
@@ -471,6 +472,6 @@
       </section>
     </div>
 
-    <script src="./app.js?v=20260221-1545" type="module"></script>
+    <script src="./app.js?v=20260221-2030" type="module"></script>
   </body>
 </html>

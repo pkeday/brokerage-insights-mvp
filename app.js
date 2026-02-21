@@ -590,7 +590,7 @@ function bindEvents() {
     }
 
     refs.runIngestBtn.disabled = true;
-    setPipelineMessage("Running Gmail ingest...");
+    setPipelineMessage("Running ingest + extraction...");
 
     try {
       const response = await apiFetch("/api/gmail/ingest", {
@@ -622,7 +622,30 @@ function bindEvents() {
       }
       await fetchArchives();
       if (extraction?.run?.id) {
+        setPipelineMessage(
+          `Ingest complete: fetched ${fetchedCount}, archived ${archivedCount}, skipped ${skippedCount}. Extraction run ${extraction.run.id} in progress...`
+        );
+        const completedRun = await waitForExtractionRunCompletion(extraction.run.id, {
+          timeoutMs: 120_000,
+          pollMs: 2500
+        });
         await refreshExtractionWorkspace();
+        if (completedRun) {
+          const runStatus = String(completedRun.status || "").toLowerCase();
+          if (runStatus === "completed") {
+            setPipelineMessage(
+              `Ingest + extraction complete: fetched ${fetchedCount}, archived ${archivedCount}, extracted ${completedRun.extractedCount || 0}, duplicates ${completedRun.duplicatesCount || 0}.`
+            );
+          } else {
+            setPipelineMessage(
+              `Ingest complete, extraction ended with status ${completedRun.status}. Processed ${completedRun.processedCount || 0}.`
+            );
+          }
+        } else {
+          setPipelineMessage(
+            `Ingest complete: fetched ${fetchedCount}, archived ${archivedCount}. Extraction is still running in background.`
+          );
+        }
       }
       if (state.view === "digest") {
         await fetchDigestPreviewFromApi();
@@ -1128,46 +1151,100 @@ function renderDashboard() {
     </article>
   `;
 
-  const grouped = groupBy(visibleReports, "broker");
-  const brokers = Object.keys(grouped).sort();
+  const groupedByCompany = groupBy(visibleReports, "canonicalCompany");
+  const companies = Object.keys(groupedByCompany).sort((left, right) => {
+    const leftLatest = Math.max(...groupedByCompany[left].map((item) => item.timestamp || 0));
+    const rightLatest = Math.max(...groupedByCompany[right].map((item) => item.timestamp || 0));
+    return rightLatest - leftLatest;
+  });
 
-  if (brokers.length === 0) {
+  if (companies.length === 0) {
     refs.brokerLanes.innerHTML = `<div class="empty-state">No reports match the selected filters.</div>`;
     return;
   }
 
-  refs.brokerLanes.innerHTML = brokers
-    .map((broker, index) => {
-      const brokerReports = grouped[broker].sort((a, b) => b.timestamp - a.timestamp);
-      const canonicalCount = brokerReports.filter((report) => !report.duplicateOf).length;
-      const duplicateCountForBroker = Math.max(0, brokerReports.length - canonicalCount);
-      const uniqueCompanies = new Set(brokerReports.map((report) => report.canonicalCompany)).size;
-      const priorityHitsForBroker = brokerReports.filter(
-        (report) => !report.duplicateOf && state.priorityCompanies.includes(report.canonicalCompany)
-      ).length;
-      const latest = brokerReports[0];
-      const typeCounts = Object.entries(groupBy(brokerReports, "type"))
+  refs.brokerLanes.innerHTML = companies
+    .map((company, index) => {
+      const companyReports = groupedByCompany[company].sort((a, b) => b.timestamp - a.timestamp);
+      const canonicalCount = companyReports.filter((report) => !report.duplicateOf).length;
+      const duplicateCountForCompany = Math.max(0, companyReports.length - canonicalCount);
+      const brokerCount = new Set(companyReports.map((report) => report.broker)).size;
+      const latest = companyReports[0];
+      const latestCanonical = companyReports.find((report) => !report.duplicateOf) || latest;
+      const companyHeadline = buildDisplaySummary(latestCanonical?.summary || "", latestCanonical?.insights || []);
+      const updateTypeCounts = Object.entries(groupBy(companyReports, "type"))
         .sort((left, right) => right[1].length - left[1].length)
         .slice(0, 4);
-
-      const typeCountHtml = typeCounts
+      const typeCountHtml = updateTypeCounts
         .map(([type, reports]) => `<span class="broker-count-chip">${escapeHtml(type)}: ${reports.length}</span>`)
+        .join("");
+
+      const previewLimit = 4;
+      const previewItems = companyReports.slice(0, previewLimit);
+      const hiddenCount = Math.max(0, companyReports.length - previewItems.length);
+      const mappedEmailHtml = previewItems
+        .map((report) => {
+          const primaryInsight = buildDisplaySummary(report.summary, report.insights);
+          const secondaryInsights = buildDisplayInsights(report.insights, report.summary, 3).slice(1, 3);
+          const dedupeTag = report.duplicateOf
+            ? `<span class="tag duplicate" title="Duplicate of ${escapeAttribute(report.duplicateOf)}">Duplicate</span>`
+            : `<span class="tag">Canonical</span>`;
+          const dedupeDetail = report.duplicateOf
+            ? `<p class="company-report-dedupe">Duplicate of ${escapeHtml(truncateDisplayText(report.duplicateOf, 42))}</p>`
+            : "";
+          const insightListHtml =
+            secondaryInsights.length > 0
+              ? `<ul class="company-report-insights">${secondaryInsights
+                  .map((insight) => `<li>${escapeHtml(insight)}</li>`)
+                  .join("")}</ul>`
+              : "";
+          const sourceHref = report.links?.archive || "#";
+          const sourceLabel = report.sourceEmailLabel || report.title || report.id || "Mapped email";
+          const sourceMapHtml =
+            sourceHref && sourceHref !== "#"
+              ? `<a class="link-btn company-report-source" href="${escapeAttribute(sourceHref)}" target="_blank" rel="noopener">Mapped email: ${escapeHtml(
+                  truncateDisplayText(sourceLabel, 90)
+                )}</a>`
+              : `<span class="company-report-source-text">Mapped email: ${escapeHtml(truncateDisplayText(sourceLabel, 90))}</span>`;
+
+          return `
+            <li class="company-report-item">
+              <div class="company-report-head">
+                <span class="tag ${tagClassForType(report.type)}">${escapeHtml(report.type)}</span>
+                ${dedupeTag}
+                <span class="company-report-broker">${escapeHtml(report.broker)}</span>
+                <span class="company-report-time">${escapeHtml(formatTime(report.time))}</span>
+              </div>
+              <p class="company-report-summary">${escapeHtml(primaryInsight)}</p>
+              ${insightListHtml}
+              ${dedupeDetail}
+              ${sourceMapHtml}
+            </li>
+          `;
+        })
         .join("");
 
       return `
         <section class="lane broker-${(index % 3) + 1}">
-          <header>${escapeHtml(broker)} · Distinct Broker Lane</header>
+          <header>${escapeHtml(company)} · Company Insights</header>
           <div class="lane-body">
             <article class="broker-summary-card">
               <div class="broker-summary-grid">
-                <div><strong>Total:</strong> ${brokerReports.length}</div>
+                <div><strong>Total updates:</strong> ${companyReports.length}</div>
                 <div><strong>Canonical:</strong> ${canonicalCount}</div>
-                <div><strong>Duplicates:</strong> ${duplicateCountForBroker}</div>
-                <div><strong>Companies:</strong> ${uniqueCompanies}</div>
-                <div><strong>Priority hits:</strong> ${priorityHitsForBroker}</div>
+                <div><strong>Duplicates:</strong> ${duplicateCountForCompany}</div>
+                <div><strong>Brokers:</strong> ${brokerCount}</div>
+                <div><strong>Priority:</strong> ${state.priorityCompanies.includes(company) ? "Yes" : "No"}</div>
                 <div><strong>Latest:</strong> ${escapeHtml(formatDateTime(latest?.time || latest?.publishedAt || ""))}</div>
               </div>
+              <p class="company-lane-summary"><strong>Top insight:</strong> ${escapeHtml(companyHeadline)}</p>
               <div class="broker-count-row">${typeCountHtml || '<span class="broker-count-chip">No report types</span>'}</div>
+              <ul class="company-report-list">${mappedEmailHtml}</ul>
+              ${
+                hiddenCount > 0
+                  ? `<div class="company-report-hidden">+${hiddenCount} more mapped updates (use filters to narrow).</div>`
+                  : ""
+              }
             </article>
           </div>
         </section>
@@ -2183,7 +2260,8 @@ function buildReports() {
         .replace(/\s+/g, " ")
         .trim()
         .replace(/\b\w/g, (value) => value.toUpperCase());
-      const summary = String(report.summary || "").trim() || report.keyPoints[0] || "(No summary)";
+      const normalizedInsights = buildDisplayInsights(report.keyPoints, report.summary, 3);
+      const summary = buildDisplaySummary(report.summary, normalizedInsights);
 
       return normalizeReport(
         {
@@ -2194,7 +2272,9 @@ function buildReports() {
           coverage: report.duplicateOfReportId ? "Extracted Duplicate" : "Extracted Canonical",
           time: report.publishedAt || new Date().toISOString(),
           summary,
-          insights: report.keyPoints.slice(0, 3),
+          insights: normalizedInsights,
+          sourceEmailLabel: report.title || report.archiveId || "",
+          sourceArchiveId: report.archiveId || "",
           sentiment: "neutral",
           duplicateOf: report.duplicateOfReportId || null,
           links: {
@@ -2215,6 +2295,8 @@ function buildReports() {
   const normalizedArchive = state.archives.items.map((archive) => {
     const companyGuess = guessCompanyFromSubject(archive.subject);
     const reportType = classifyReportType(archive.subject, archive.bodyPreview || archive.snippet || "");
+    const archiveRawText = archive.bodyPreview || archive.snippet || "(No preview)";
+    const archiveInsights = buildDisplayInsights([], archiveRawText, 2);
 
     return normalizeReport(
       {
@@ -2224,8 +2306,10 @@ function buildReports() {
         type: reportType,
         coverage: "Email Archive",
         time: archive.dateHeader || archive.ingestedAt,
-        summary: archive.bodyPreview || archive.snippet || "(No preview)",
-        insights: [],
+        summary: buildDisplaySummary(archiveRawText, archiveInsights),
+        insights: archiveInsights,
+        sourceEmailLabel: archive.subject || archive.id,
+        sourceArchiveId: archive.id || "",
         sentiment: "neutral",
         links: {
           archive: toApiAbsolute(archive.downloadUrl),
@@ -2908,6 +2992,41 @@ async function abortExtractionRun(runId) {
     state.extraction.abortingRunId = "";
     renderExtractionWorkspace();
   }
+}
+
+async function waitForExtractionRunCompletion(runId, options = {}) {
+  const normalizedRunId = String(runId ?? "").trim();
+  if (!normalizedRunId || !state.auth.token) {
+    return null;
+  }
+
+  const timeoutMs = Math.max(10_000, Number(options.timeoutMs || 120_000));
+  const pollMs = Math.max(1000, Number(options.pollMs || 2500));
+  const startedAt = Date.now();
+  const terminalStatuses = new Set(["completed", "failed", "aborted"]);
+
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const payload = await apiFetch(`/api/extraction/runs/${encodeURIComponent(normalizedRunId)}/status`);
+      const run = normalizeExtractionRun(payload?.run || payload);
+      if (run) {
+        const normalizedStatus = String(run.status || "").toLowerCase();
+        state.extraction.lastRun = run;
+        if (terminalStatuses.has(normalizedStatus)) {
+          return run;
+        }
+      }
+    } catch (error) {
+      const status = Number(error?.status || 0);
+      if (status === 404) {
+        return null;
+      }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+
+  return null;
 }
 
 async function fetchExtractionRuns(options = {}) {
@@ -4223,6 +4342,97 @@ function groupBy(items, field) {
     acc[key].push(item);
     return acc;
   }, {});
+}
+
+function cleanInsightText(value) {
+  const text = String(value ?? "");
+  if (!text) {
+    return "";
+  }
+
+  return text
+    .replace(/\b(?:from|to|cc|bcc|sent|subject|reply-to)\s*:[^\n]{0,180}/gi, " ")
+    .replace(/\bid=[^\s|]{8,}/gi, " ")
+    .replace(/\b(?:https?:\/\/|www\.)\S+\b/gi, " ")
+    .replace(/=[0-9A-F]{2}/gi, " ")
+    .replace(/\[(?:redacted-email|redacted-phone|redacted-sender|redacted-recipient|redacted-person)\]/gi, " ")
+    .replace(/\b[a-z0-9_-]{24,}\b/gi, " ")
+    .replace(/\s*[|•]\s*/g, ". ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function splitInsightSentences(value) {
+  const cleaned = cleanInsightText(value);
+  if (!cleaned) {
+    return [];
+  }
+
+  const sentences = cleaned
+    .split(/(?<=[.!?])\s+|;\s+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  if (sentences.length > 1) {
+    return sentences;
+  }
+
+  return cleaned
+    .split(/\s+[|,:]\s+/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length >= 24);
+}
+
+function sanitizeInsightText(value, maxLength = 220) {
+  const cleaned = cleanInsightText(value);
+  if (!cleaned) {
+    return "";
+  }
+  return truncateDisplayText(cleaned, maxLength);
+}
+
+function buildDisplayInsights(primaryPoints, fallbackText, maxItems = 3) {
+  const candidates = [];
+  if (Array.isArray(primaryPoints)) {
+    candidates.push(...primaryPoints);
+  }
+  candidates.push(...splitInsightSentences(fallbackText));
+
+  const seen = new Set();
+  const insights = [];
+  for (const candidate of candidates) {
+    const cleaned = sanitizeInsightText(candidate, 180);
+    if (!cleaned || cleaned.length < 20) {
+      continue;
+    }
+    const key = normalizeKey(cleaned);
+    if (key && seen.has(key)) {
+      continue;
+    }
+    if (key) {
+      seen.add(key);
+    }
+    insights.push(cleaned);
+    if (insights.length >= maxItems) {
+      break;
+    }
+  }
+
+  return insights;
+}
+
+function buildDisplaySummary(summaryValue, insightPoints) {
+  const insights = buildDisplayInsights(insightPoints, summaryValue, 1);
+  if (insights.length > 0) {
+    return insights[0];
+  }
+
+  const cleanedSummary = sanitizeInsightText(summaryValue, 240);
+  if (cleanedSummary) {
+    return cleanedSummary;
+  }
+
+  return "(No summary)";
 }
 
 function debounce(callback, waitMs = 200) {
