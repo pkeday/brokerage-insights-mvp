@@ -56,6 +56,30 @@ const fallbackAiCategories = [
   "others"
 ];
 
+const extractionEndpointCatalog = {
+  trigger: [
+    "/api/extraction/runs",
+    "/api/extraction/run",
+    "/api/extractions/run",
+    "/api/extractions/runs",
+    "/api/jobs/extraction",
+    "/api/reports/extraction/run"
+  ],
+  runs: [
+    "/api/extraction/runs",
+    "/api/extractions/runs",
+    "/api/reports/extraction/runs",
+    "/api/report-extraction/runs"
+  ],
+  reports: [
+    "/api/extracted-reports",
+    "/api/extraction/reports",
+    "/api/extractions/reports",
+    "/api/reports/extracted",
+    "/api/reports/extraction/items"
+  ]
+};
+
 const defaultDictionary = [
   {
     canonical: "Reliance Industries",
@@ -247,6 +271,35 @@ const state = {
     suggestionsError: "",
     suggestionContext: null
   },
+  extraction: {
+    endpointStatus: {
+      trigger: "unknown",
+      runs: "unknown",
+      reports: "unknown"
+    },
+    endpoints: {
+      trigger: "",
+      runs: "",
+      reports: ""
+    },
+    statusMessage: "Checking extraction endpoints...",
+    runStarting: false,
+    runsLoading: false,
+    reportsLoading: false,
+    runsError: "",
+    reportsError: "",
+    runs: [],
+    runsTotal: 0,
+    lastRun: null,
+    reports: [],
+    reportsTotal: 0,
+    fetchedAt: null,
+    filters: {
+      broker: "All",
+      company: "",
+      reportType: "All"
+    }
+  },
   priorityCompanies: loadList(STORAGE_KEYS.priority, ["Reliance Industries", "UltraTech Cement", "ICICI Bank"]),
   ignoredCompanies: loadList(STORAGE_KEYS.ignored, ["Adani Ports", "Vodafone Idea"]),
   digestRecipients: loadList(STORAGE_KEYS.recipients, ["pkeday@gmail.com"]),
@@ -309,6 +362,17 @@ const refs = {
   chipRow: document.getElementById("control-chip-row"),
   kpiGrid: document.getElementById("kpi-grid"),
   brokerLanes: document.getElementById("broker-lanes"),
+  runExtractionBtn: document.getElementById("run-extraction-btn"),
+  refreshExtractionBtn: document.getElementById("refresh-extraction-btn"),
+  extractionStatusNote: document.getElementById("extraction-status-note"),
+  extractionLastRun: document.getElementById("extraction-last-run"),
+  extractionRunsTable: document.getElementById("extraction-runs-table"),
+  extractedFilterBroker: document.getElementById("extracted-filter-broker"),
+  extractedFilterCompany: document.getElementById("extracted-filter-company"),
+  extractedFilterType: document.getElementById("extracted-filter-type"),
+  refreshExtractedBtn: document.getElementById("refresh-extracted-btn"),
+  extractedReportsMeta: document.getElementById("extracted-reports-meta"),
+  extractedReportsTable: document.getElementById("extracted-reports-table"),
   archiveBrokerFilter: document.getElementById("archive-broker-filter"),
   archiveSearch: document.getElementById("archive-search"),
   archiveRefreshBtn: document.getElementById("archive-refresh-btn"),
@@ -370,7 +434,13 @@ async function init() {
   hydrateCompanySelect();
   bindEvents();
   renderAll();
-  await Promise.allSettled([checkBackendStatus(), refreshAuthState(), fetchNotificationCategories(), fetchNotifications()]);
+  await Promise.allSettled([
+    checkBackendStatus(),
+    refreshAuthState(),
+    fetchNotificationCategories(),
+    fetchNotifications(),
+    refreshExtractionWorkspace()
+  ]);
 }
 
 function bindEvents() {
@@ -382,6 +452,10 @@ function bindEvents() {
     state.notifications.page = 1;
     void fetchNotifications();
   }, 220);
+  const scheduleExtractionCompanySearch = debounce(() => {
+    state.extraction.filters.company = (refs.extractedFilterCompany?.value ?? "").trim();
+    renderExtractionWorkspace();
+  }, 180);
 
   for (const button of refs.sectionButtons) {
     button.addEventListener("click", () => {
@@ -556,6 +630,45 @@ function bindEvents() {
     state.filters.includeDuplicates = event.target.checked;
     renderDashboard();
   });
+
+  if (refs.runExtractionBtn) {
+    refs.runExtractionBtn.addEventListener("click", async () => {
+      await triggerExtractionRun();
+    });
+  }
+
+  if (refs.refreshExtractionBtn) {
+    refs.refreshExtractionBtn.addEventListener("click", async () => {
+      await refreshExtractionWorkspace();
+    });
+  }
+
+  if (refs.refreshExtractedBtn) {
+    refs.refreshExtractedBtn.addEventListener("click", async () => {
+      await fetchExtractedReports();
+      renderExtractionWorkspace();
+    });
+  }
+
+  if (refs.extractedFilterBroker) {
+    refs.extractedFilterBroker.addEventListener("change", (event) => {
+      state.extraction.filters.broker = event.target.value;
+      renderExtractionWorkspace();
+    });
+  }
+
+  if (refs.extractedFilterType) {
+    refs.extractedFilterType.addEventListener("change", (event) => {
+      state.extraction.filters.reportType = event.target.value;
+      renderExtractionWorkspace();
+    });
+  }
+
+  if (refs.extractedFilterCompany) {
+    refs.extractedFilterCompany.addEventListener("input", () => {
+      scheduleExtractionCompanySearch();
+    });
+  }
 
   refs.archiveBrokerFilter.addEventListener("change", (event) => {
     state.archives.brokerFilter = event.target.value;
@@ -831,6 +944,7 @@ function renderAll() {
 
 function renderAllDataViews() {
   renderDashboard();
+  renderExtractionWorkspace();
   renderArchiveView();
   renderCompanyView();
   renderNotifications();
@@ -974,6 +1088,271 @@ function renderDashboard() {
       `;
     })
     .join("");
+}
+
+function renderExtractionWorkspace() {
+  if (
+    !refs.extractionStatusNote ||
+    !refs.extractionLastRun ||
+    !refs.extractionRunsTable ||
+    !refs.extractedReportsMeta ||
+    !refs.extractedReportsTable
+  ) {
+    return;
+  }
+
+  hydrateExtractedReportFilters();
+
+  const authMissing = !state.auth.token;
+  const triggerUnavailable = state.extraction.endpointStatus.trigger === "unavailable";
+  const runsUnavailable = state.extraction.endpointStatus.runs === "unavailable";
+  const reportsUnavailable = state.extraction.endpointStatus.reports === "unavailable";
+
+  let statusClass = "";
+  let statusMessage = state.extraction.statusMessage || "";
+  if (!statusMessage) {
+    statusMessage = authMissing
+      ? "Sign in with Google to access extraction runs and extracted reports."
+      : "Extraction workspace ready.";
+  }
+
+  if (triggerUnavailable && runsUnavailable && reportsUnavailable) {
+    statusClass = "warn";
+    statusMessage = "Extraction endpoints are unavailable in this backend. Workspace is in standby mode.";
+  } else if (state.extraction.runsError || state.extraction.reportsError) {
+    statusClass = "warn";
+  } else if (state.extraction.fetchedAt && !state.extraction.runsLoading && !state.extraction.reportsLoading) {
+    statusClass = "good";
+  }
+
+  refs.extractionStatusNote.className = `note${statusClass ? ` ${statusClass}` : ""}`;
+  refs.extractionStatusNote.textContent = statusMessage;
+
+  if (refs.runExtractionBtn) {
+    refs.runExtractionBtn.disabled = state.extraction.runStarting || triggerUnavailable || authMissing;
+    refs.runExtractionBtn.textContent = state.extraction.runStarting ? "Running extraction..." : "Run extraction now";
+  }
+
+  if (refs.refreshExtractionBtn) {
+    refs.refreshExtractionBtn.disabled = state.extraction.runStarting || state.extraction.runsLoading || state.extraction.reportsLoading;
+  }
+
+  if (refs.refreshExtractedBtn) {
+    refs.refreshExtractedBtn.disabled = state.extraction.reportsLoading;
+  }
+
+  const lastRun = normalizeExtractionRun(state.extraction.lastRun);
+  if (state.extraction.runsLoading && !lastRun) {
+    refs.extractionLastRun.className = "note";
+    refs.extractionLastRun.textContent = "Last run: loading...";
+  } else if (lastRun) {
+    const status = formatExtractionRunStatus(lastRun.status);
+    refs.extractionLastRun.className = "note";
+    refs.extractionLastRun.innerHTML = `
+      <strong>Last run</strong>: ${escapeHtml(formatDateTime(lastRun.startedAt))} | ${escapeHtml(status)} |
+      processed ${escapeHtml(formatCount(lastRun.processedCount))},
+      extracted ${escapeHtml(formatCount(lastRun.extractedCount))},
+      duplicates ${escapeHtml(formatCount(lastRun.duplicatesCount))}
+    `;
+  } else if (runsUnavailable) {
+    refs.extractionLastRun.className = "note warn";
+    refs.extractionLastRun.textContent = "Last run: unavailable (extraction runs endpoint not found).";
+  } else if (authMissing) {
+    refs.extractionLastRun.className = "note";
+    refs.extractionLastRun.textContent = "Last run: sign in required.";
+  } else {
+    refs.extractionLastRun.className = "note";
+    refs.extractionLastRun.textContent = "Last run: no extraction runs yet.";
+  }
+
+  if (state.extraction.runsLoading && state.extraction.runs.length === 0) {
+    refs.extractionRunsTable.innerHTML =
+      '<tr><td colspan="5"><div class="empty-state">Loading extraction run history...</div></td></tr>';
+  } else if (runsUnavailable) {
+    refs.extractionRunsTable.innerHTML =
+      '<tr><td colspan="5"><div class="empty-state">Extraction run history endpoint is unavailable in this environment.</div></td></tr>';
+  } else if (state.extraction.runsError) {
+    refs.extractionRunsTable.innerHTML = `<tr><td colspan="5"><div class="empty-state">Failed to load extraction runs: ${escapeHtml(
+      state.extraction.runsError
+    )}</div></td></tr>`;
+  } else if (state.extraction.runs.length === 0) {
+    refs.extractionRunsTable.innerHTML =
+      '<tr><td colspan="5"><div class="empty-state">No extraction runs yet. Trigger a run to populate history.</div></td></tr>';
+  } else {
+    refs.extractionRunsTable.innerHTML = state.extraction.runs
+      .map((run) => {
+        const status = formatExtractionRunStatus(run.status);
+        return `
+          <tr>
+            <td>${escapeHtml(formatDateTime(run.startedAt))}</td>
+            <td><span class="tag extraction-status ${escapeAttribute(extractionStatusClass(run.status))}">${escapeHtml(status)}</span></td>
+            <td>${escapeHtml(formatCount(run.processedCount))}</td>
+            <td>${escapeHtml(formatCount(run.extractedCount))}</td>
+            <td>${escapeHtml(formatCount(run.duplicatesCount))}</td>
+          </tr>
+        `;
+      })
+      .join("");
+  }
+
+  const visibleReports = getVisibleExtractedReports();
+  const fetchedAtLabel = state.extraction.fetchedAt ? new Date(state.extraction.fetchedAt).toLocaleString() : "not fetched yet";
+
+  if (reportsUnavailable) {
+    refs.extractedReportsMeta.className = "note warn";
+    refs.extractedReportsMeta.textContent = "Extracted report endpoint unavailable. Waiting for backend rollout.";
+  } else if (state.extraction.reportsError) {
+    refs.extractedReportsMeta.className = "note warn";
+    refs.extractedReportsMeta.textContent = `Failed to load extracted reports: ${state.extraction.reportsError}`;
+  } else {
+    refs.extractedReportsMeta.className = "note";
+    refs.extractedReportsMeta.textContent = `${visibleReports.length} visible extracted reports (${state.extraction.reportsTotal} total loaded). Last fetch: ${fetchedAtLabel}.`;
+  }
+
+  if (state.extraction.reportsLoading && state.extraction.reports.length === 0) {
+    refs.extractedReportsTable.innerHTML =
+      '<tr><td colspan="8"><div class="empty-state">Loading extracted reports...</div></td></tr>';
+    return;
+  }
+
+  if (reportsUnavailable) {
+    refs.extractedReportsTable.innerHTML =
+      '<tr><td colspan="8"><div class="empty-state">Extracted reports will appear here once extraction endpoints are available.</div></td></tr>';
+    return;
+  }
+
+  if (state.extraction.reportsError) {
+    refs.extractedReportsTable.innerHTML = `<tr><td colspan="8"><div class="empty-state">Failed to load extracted reports: ${escapeHtml(
+      state.extraction.reportsError
+    )}</div></td></tr>`;
+    return;
+  }
+
+  if (state.extraction.reports.length === 0) {
+    refs.extractedReportsTable.innerHTML =
+      '<tr><td colspan="8"><div class="empty-state">No extracted reports yet. Run extraction to generate report records.</div></td></tr>';
+    return;
+  }
+
+  if (visibleReports.length === 0) {
+    refs.extractedReportsTable.innerHTML =
+      '<tr><td colspan="8"><div class="empty-state">No extracted reports match the selected filters.</div></td></tr>';
+    return;
+  }
+
+  refs.extractedReportsTable.innerHTML = visibleReports
+    .map((report) => {
+      const confidenceText = report.confidence === null ? "-" : `${Math.round(report.confidence)}%`;
+      const sourceLink = buildExtractedSourceLink(report);
+
+      return `
+        <tr>
+          <td>${escapeHtml(formatDateTime(report.publishedAt))}</td>
+          <td>${escapeHtml(report.broker)}</td>
+          <td>${escapeHtml(report.companyCanonical)}</td>
+          <td>${escapeHtml(report.reportType)}</td>
+          <td>${escapeHtml(report.title)}</td>
+          <td>${escapeHtml(report.summary)}</td>
+          <td>${escapeHtml(confidenceText)}</td>
+          <td>${sourceLink}</td>
+        </tr>
+      `;
+    })
+    .join("");
+}
+
+function hydrateExtractedReportFilters() {
+  if (!refs.extractedFilterBroker || !refs.extractedFilterType || !refs.extractedFilterCompany) {
+    return;
+  }
+
+  const brokers = Array.from(new Set(state.extraction.reports.map((report) => report.broker).filter(Boolean))).sort();
+  refs.extractedFilterBroker.innerHTML = [
+    '<option value="All">All</option>',
+    ...brokers.map((broker) => `<option value="${escapeAttribute(broker)}">${escapeHtml(broker)}</option>`)
+  ].join("");
+  if (!brokers.includes(state.extraction.filters.broker)) {
+    state.extraction.filters.broker = "All";
+  }
+  refs.extractedFilterBroker.value = state.extraction.filters.broker;
+
+  const reportTypes = Array.from(new Set(state.extraction.reports.map((report) => report.reportType).filter(Boolean))).sort();
+  refs.extractedFilterType.innerHTML = [
+    '<option value="All">All</option>',
+    ...reportTypes.map((reportType) => `<option value="${escapeAttribute(reportType)}">${escapeHtml(reportType)}</option>`)
+  ].join("");
+  if (!reportTypes.includes(state.extraction.filters.reportType)) {
+    state.extraction.filters.reportType = "All";
+  }
+  refs.extractedFilterType.value = state.extraction.filters.reportType;
+
+  if (refs.extractedFilterCompany.value !== state.extraction.filters.company) {
+    refs.extractedFilterCompany.value = state.extraction.filters.company;
+  }
+}
+
+function getVisibleExtractedReports() {
+  const brokerFilter = state.extraction.filters.broker;
+  const reportTypeFilter = state.extraction.filters.reportType;
+  const companyQuery = state.extraction.filters.company.trim().toLowerCase();
+
+  return state.extraction.reports
+    .filter((report) => {
+      if (brokerFilter !== "All" && report.broker !== brokerFilter) {
+        return false;
+      }
+
+      if (reportTypeFilter !== "All" && report.reportType !== reportTypeFilter) {
+        return false;
+      }
+
+      if (companyQuery) {
+        const haystack = `${report.companyCanonical} ${report.companyRaw} ${report.title}`.toLowerCase();
+        if (!haystack.includes(companyQuery)) {
+          return false;
+        }
+      }
+
+      return true;
+    })
+    .sort((left, right) => right.publishedAtEpoch - left.publishedAtEpoch);
+}
+
+function buildExtractedSourceLink(report) {
+  if (report.sourceUrl) {
+    return `<a class="link-btn" href="${escapeAttribute(report.sourceUrl)}" target="_blank" rel="noopener">Source</a>`;
+  }
+
+  if (report.archiveId) {
+    const archivePath = `/api/email-archives/${encodeURIComponent(report.archiveId)}/raw`;
+    return `<a class="link-btn" href="${escapeAttribute(toApiAbsolute(archivePath))}" target="_blank" rel="noopener">Archive ${escapeHtml(
+      report.archiveId
+    )}</a>`;
+  }
+
+  return "-";
+}
+
+function formatExtractionRunStatus(value) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) {
+    return "Unknown";
+  }
+
+  return normalized
+    .replaceAll("-", "_")
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function extractionStatusClass(value) {
+  return `extraction-status-${String(value ?? "unknown")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "unknown"}`;
 }
 
 function renderReportCard(report) {
@@ -1838,6 +2217,7 @@ async function refreshAuthState() {
     state.auth.ingestionPreferences = null;
     state.archives.items = [];
     state.archives.total = 0;
+    resetExtractionStateForSignedOut();
     renderAllDataViews();
     return;
   }
@@ -1868,11 +2248,13 @@ async function refreshAuthState() {
     }
 
     await fetchArchives();
+    await refreshExtractionWorkspace();
   } catch {
     clearAuthToken();
     state.auth.user = null;
     state.auth.gmailConnected = false;
     state.auth.ingestionPreferences = null;
+    resetExtractionStateForSignedOut();
     setPipelineMessage("Session expired. Please sign in with Google again.");
   } finally {
     state.auth.loading = false;
@@ -1914,6 +2296,7 @@ async function signOut() {
   state.auth.ingestionPreferences = null;
   state.archives.items = [];
   state.archives.total = 0;
+  resetExtractionStateForSignedOut();
   closeIngestSetupModal();
   setPipelineMessage("Signed out.");
   renderAll();
@@ -1967,6 +2350,516 @@ async function fetchArchives() {
   } catch (error) {
     setPipelineMessage(`Failed to load archives: ${error.message}`);
   }
+}
+
+function resetExtractionStateForSignedOut() {
+  state.extraction.statusMessage = "Sign in with Google to access extraction runs and extracted reports.";
+  state.extraction.runStarting = false;
+  state.extraction.runsLoading = false;
+  state.extraction.reportsLoading = false;
+  state.extraction.runsError = "";
+  state.extraction.reportsError = "";
+  state.extraction.runs = [];
+  state.extraction.runsTotal = 0;
+  state.extraction.lastRun = null;
+  state.extraction.reports = [];
+  state.extraction.reportsTotal = 0;
+  state.extraction.fetchedAt = null;
+}
+
+async function refreshExtractionWorkspace() {
+  await Promise.allSettled([fetchExtractionRuns({ silent: true }), fetchExtractedReports({ silent: true })]);
+
+  if (
+    state.extraction.endpointStatus.trigger === "unknown" &&
+    state.extraction.endpointStatus.runs === "unavailable" &&
+    state.extraction.endpointStatus.reports === "unavailable"
+  ) {
+    state.extraction.endpointStatus.trigger = "unavailable";
+  }
+
+  const unavailableRuns = state.extraction.endpointStatus.runs === "unavailable";
+  const unavailableReports = state.extraction.endpointStatus.reports === "unavailable";
+  const unavailableTrigger = state.extraction.endpointStatus.trigger === "unavailable";
+
+  if (unavailableRuns && unavailableReports && unavailableTrigger) {
+    state.extraction.statusMessage = "Extraction endpoints are unavailable in this backend. Workspace is in standby mode.";
+  } else if (!state.extraction.runsError && !state.extraction.reportsError && state.extraction.fetchedAt) {
+    state.extraction.statusMessage = `Extraction data refreshed at ${new Date(state.extraction.fetchedAt).toLocaleTimeString()}.`;
+  }
+
+  renderExtractionWorkspace();
+}
+
+async function triggerExtractionRun() {
+  if (state.extraction.runStarting) {
+    return;
+  }
+
+  if (!state.auth.token) {
+    state.extraction.statusMessage = "Sign in with Google before running extraction.";
+    renderExtractionWorkspace();
+    return;
+  }
+
+  state.extraction.runStarting = true;
+  state.extraction.statusMessage = "Triggering extraction run...";
+  renderExtractionWorkspace();
+
+  try {
+    const result = await callExtractionEndpoint("trigger", { method: "POST" });
+    if (result.ok) {
+      const normalized = normalizeExtractionRunsPayload(result.payload);
+      if (normalized.lastRun) {
+        state.extraction.lastRun = normalized.lastRun;
+      }
+      state.extraction.statusMessage = "Extraction run triggered. Refreshing run status and reports...";
+      setPipelineMessage("Extraction run triggered.");
+      await refreshExtractionWorkspace();
+      return;
+    }
+
+    if (result.unauthorized) {
+      state.extraction.statusMessage = "Extraction run requires an authenticated session.";
+      return;
+    }
+
+    if (result.unavailable) {
+      state.extraction.statusMessage = "Extraction trigger endpoint unavailable in this deployment.";
+      return;
+    }
+
+    state.extraction.statusMessage = `Extraction run failed: ${result.error?.message || "Unknown error"}`;
+  } finally {
+    state.extraction.runStarting = false;
+    renderExtractionWorkspace();
+  }
+}
+
+async function fetchExtractionRuns(options = {}) {
+  const silent = Boolean(options.silent);
+  state.extraction.runsLoading = true;
+  state.extraction.runsError = "";
+  if (!silent && !state.extraction.runStarting) {
+    state.extraction.statusMessage = "Loading extraction run history...";
+  }
+  renderExtractionWorkspace();
+
+  try {
+    const result = await callExtractionEndpoint("runs", {}, { limit: 20, offset: 0 });
+    if (!result.ok) {
+      if (result.unauthorized) {
+        state.extraction.runs = [];
+        state.extraction.runsTotal = 0;
+        state.extraction.lastRun = null;
+        if (!silent) {
+          state.extraction.statusMessage = "Sign in to view extraction run history.";
+        }
+        return;
+      }
+
+      if (result.unavailable) {
+        state.extraction.runs = [];
+        state.extraction.runsTotal = 0;
+        state.extraction.lastRun = null;
+        if (!silent) {
+          state.extraction.statusMessage = "Extraction run history endpoint unavailable.";
+        }
+        return;
+      }
+
+      throw result.error || new Error("Failed to fetch extraction runs");
+    }
+
+    const normalized = normalizeExtractionRunsPayload(result.payload);
+    state.extraction.runs = normalized.items;
+    state.extraction.runsTotal = normalized.total;
+    state.extraction.lastRun = normalized.lastRun;
+  } catch (error) {
+    state.extraction.runsError = error instanceof Error ? error.message : "Unknown extraction runs error";
+    if (!silent) {
+      state.extraction.statusMessage = `Failed to load extraction runs: ${state.extraction.runsError}`;
+    }
+  } finally {
+    state.extraction.runsLoading = false;
+    renderExtractionWorkspace();
+  }
+}
+
+async function fetchExtractedReports(options = {}) {
+  const silent = Boolean(options.silent);
+  state.extraction.reportsLoading = true;
+  state.extraction.reportsError = "";
+  if (!silent) {
+    state.extraction.statusMessage = "Loading extracted reports...";
+  }
+  renderExtractionWorkspace();
+
+  try {
+    const result = await callExtractionEndpoint("reports", {}, { limit: 250, offset: 0 });
+    if (!result.ok) {
+      if (result.unauthorized) {
+        state.extraction.reports = [];
+        state.extraction.reportsTotal = 0;
+        if (!silent) {
+          state.extraction.statusMessage = "Sign in to view extracted reports.";
+        }
+        return;
+      }
+
+      if (result.unavailable) {
+        state.extraction.reports = [];
+        state.extraction.reportsTotal = 0;
+        if (!silent) {
+          state.extraction.statusMessage = "Extracted reports endpoint unavailable.";
+        }
+        return;
+      }
+
+      throw result.error || new Error("Failed to fetch extracted reports");
+    }
+
+    const normalized = normalizeExtractedReportsPayload(result.payload);
+    state.extraction.reports = normalized.items;
+    state.extraction.reportsTotal = normalized.total;
+    state.extraction.fetchedAt = new Date().toISOString();
+  } catch (error) {
+    state.extraction.reportsError = error instanceof Error ? error.message : "Unknown extracted reports error";
+    if (!silent) {
+      state.extraction.statusMessage = `Failed to load extracted reports: ${state.extraction.reportsError}`;
+    }
+  } finally {
+    state.extraction.reportsLoading = false;
+    renderExtractionWorkspace();
+  }
+}
+
+async function callExtractionEndpoint(kind, requestOptions = {}, query = null) {
+  const existing = state.extraction.endpoints[kind];
+  const fallbackCandidates = Array.isArray(extractionEndpointCatalog[kind]) ? extractionEndpointCatalog[kind] : [];
+  const candidates = existing
+    ? [existing, ...fallbackCandidates.filter((candidate) => candidate !== existing)]
+    : [...fallbackCandidates];
+  let lastMissingError = null;
+
+  for (const endpointBase of candidates) {
+    const endpoint = buildEndpointWithQuery(endpointBase, query);
+    try {
+      const payload = await apiFetch(endpoint, requestOptions);
+      state.extraction.endpoints[kind] = endpointBase;
+      state.extraction.endpointStatus[kind] = "ready";
+      return { ok: true, payload, endpoint: endpointBase };
+    } catch (error) {
+      const status = Number(error?.status || 0);
+
+      if (status === 401 || status === 403) {
+        state.extraction.endpoints[kind] = endpointBase;
+        state.extraction.endpointStatus[kind] = "auth_required";
+        return { ok: false, unauthorized: true, error, endpoint: endpointBase };
+      }
+
+      if (status === 404 || status === 405 || status === 501) {
+        lastMissingError = error;
+        continue;
+      }
+
+      state.extraction.endpoints[kind] = endpointBase;
+      state.extraction.endpointStatus[kind] = "error";
+      return { ok: false, failed: true, error, endpoint: endpointBase };
+    }
+  }
+
+  state.extraction.endpoints[kind] = "";
+  state.extraction.endpointStatus[kind] = "unavailable";
+  return {
+    ok: false,
+    unavailable: true,
+    error: lastMissingError || new Error("Endpoint unavailable")
+  };
+}
+
+function buildEndpointWithQuery(endpoint, query) {
+  if (!query || typeof query !== "object") {
+    return endpoint;
+  }
+
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value === null || value === undefined || value === "") {
+      continue;
+    }
+    params.set(key, String(value));
+  }
+
+  const queryString = params.toString();
+  return queryString ? `${endpoint}?${queryString}` : endpoint;
+}
+
+function normalizeExtractionRunsPayload(payload) {
+  const items = extractItemsFromPayload(payload, ["items", "runs", "results"]).map((entry) => normalizeExtractionRun(entry)).filter(Boolean);
+  const sortedItems = items.sort((left, right) => right.startedAtEpoch - left.startedAtEpoch);
+  const totalValue = Number(
+    payload?.total ??
+      payload?.count ??
+      payload?.runsTotal ??
+      payload?.meta?.total ??
+      payload?.data?.total ??
+      sortedItems.length
+  );
+  const total = Number.isFinite(totalValue) ? Math.max(0, Math.floor(totalValue)) : sortedItems.length;
+  const lastRunFromPayload =
+    normalizeExtractionRun(payload?.lastRun) ||
+    normalizeExtractionRun(payload?.latestRun) ||
+    normalizeExtractionRun(payload?.latest) ||
+    normalizeExtractionRun(payload?.data?.lastRun);
+  const lastRun = lastRunFromPayload || sortedItems[0] || null;
+
+  return {
+    items: sortedItems,
+    total,
+    lastRun
+  };
+}
+
+function normalizeExtractedReportsPayload(payload) {
+  const items = extractItemsFromPayload(payload, ["items", "reports", "records", "results"])
+    .map((entry) => normalizeExtractedReport(entry))
+    .filter(Boolean);
+  const sortedItems = items.sort((left, right) => right.publishedAtEpoch - left.publishedAtEpoch);
+  const totalValue = Number(
+    payload?.total ??
+      payload?.count ??
+      payload?.reportsTotal ??
+      payload?.meta?.total ??
+      payload?.data?.total ??
+      sortedItems.length
+  );
+  const total = Number.isFinite(totalValue) ? Math.max(0, Math.floor(totalValue)) : sortedItems.length;
+
+  return {
+    items: sortedItems,
+    total
+  };
+}
+
+function extractItemsFromPayload(payload, keys = []) {
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+
+  if (!payload || typeof payload !== "object") {
+    return [];
+  }
+
+  for (const key of keys) {
+    if (Array.isArray(payload[key])) {
+      return payload[key];
+    }
+  }
+
+  if (payload.data && typeof payload.data === "object") {
+    if (Array.isArray(payload.data)) {
+      return payload.data;
+    }
+
+    for (const key of keys) {
+      if (Array.isArray(payload.data[key])) {
+        return payload.data[key];
+      }
+    }
+
+    if (Array.isArray(payload.data.items)) {
+      return payload.data.items;
+    }
+  }
+
+  return [];
+}
+
+function normalizeExtractionRun(entry) {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+
+  const startedAt = normalizeDateTimeValue(
+    pickFirstValue(entry, [
+      "startedAt",
+      "started_at",
+      "runStartedAt",
+      "run_started_at",
+      "createdAt",
+      "created_at",
+      "queuedAt",
+      "queued_at",
+      "timestamp"
+    ])
+  );
+  const status = String(pickFirstValue(entry, ["status", "state", "runStatus", "run_status"], "unknown") || "unknown").trim();
+  const processedCount = pickFirstNumber(entry, [
+    "processedCount",
+    "processed_count",
+    "archivesProcessed",
+    "archives_processed",
+    "totalProcessed",
+    "total_processed",
+    "sourceCount",
+    "source_count"
+  ]);
+  const extractedCount = pickFirstNumber(entry, [
+    "extractedCount",
+    "extracted_count",
+    "reportsExtracted",
+    "reports_extracted",
+    "insertedCount",
+    "inserted_count",
+    "createdCount",
+    "created_count"
+  ]);
+  const duplicatesCount = pickFirstNumber(entry, [
+    "duplicatesCount",
+    "duplicates_count",
+    "duplicateCount",
+    "duplicate_count",
+    "dedupedCount",
+    "deduped_count"
+  ]);
+
+  return {
+    id: String(pickFirstValue(entry, ["id", "runId", "run_id", "jobId", "job_id"], "") || "").trim(),
+    startedAt,
+    status: status || "unknown",
+    processedCount,
+    extractedCount,
+    duplicatesCount,
+    startedAtEpoch: parseDateValue(startedAt)?.getTime() || 0
+  };
+}
+
+function normalizeExtractedReport(entry) {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+
+  const companyCanonical = String(
+    pickFirstValue(entry, ["companyCanonical", "company_canonical", "company", "companyName", "company_name"], "")
+  ).trim();
+  const companyRaw = String(pickFirstValue(entry, ["companyRaw", "company_raw", "companyOriginal", "company_original"], "")).trim();
+  const keyPointsValue = pickFirstValue(entry, ["keyPoints", "key_points", "points"], []);
+  const keyPoints = Array.isArray(keyPointsValue)
+    ? keyPointsValue.map((value) => String(value).trim()).filter(Boolean)
+    : [];
+  const summary = String(pickFirstValue(entry, ["summary", "snippet", "abstract"], "")).trim();
+  const publishedAt = normalizeDateTimeValue(
+    pickFirstValue(
+      entry,
+      ["publishedAt", "published_at", "reportDate", "report_date", "createdAt", "created_at", "updatedAt", "updated_at"],
+      ""
+    )
+  );
+  const sourceUrlRaw = String(pickFirstValue(entry, ["sourceUrl", "source_url", "archiveUrl", "archive_url", "url"], "")).trim();
+
+  return {
+    archiveId: String(pickFirstValue(entry, ["archiveId", "archive_id", "emailArchiveId", "email_archive_id"], "")).trim(),
+    userId: String(pickFirstValue(entry, ["userId", "user_id"], "")).trim(),
+    broker: String(pickFirstValue(entry, ["broker", "brokerName", "broker_name"], "Unmapped Broker")).trim() || "Unmapped Broker",
+    companyCanonical: companyCanonical || companyRaw || "Unknown Company",
+    companyRaw,
+    reportType: String(pickFirstValue(entry, ["reportType", "report_type", "type", "category"], "Unknown")).trim() || "Unknown",
+    title: String(pickFirstValue(entry, ["title", "headline", "subject"], "(Untitled report)")).trim() || "(Untitled report)",
+    summary: summary || keyPoints.join(" | ") || "(No summary)",
+    keyPoints,
+    publishedAt,
+    confidence: normalizeConfidence(pickFirstValue(entry, ["confidence", "score", "probability"], null)),
+    duplicateKey: String(pickFirstValue(entry, ["duplicateKey", "duplicate_key", "dedupeKey", "dedupe_key"], "")).trim(),
+    sourceUrl: /^https?:\/\//i.test(sourceUrlRaw) ? sourceUrlRaw : "",
+    publishedAtEpoch: parseDateValue(publishedAt)?.getTime() || 0
+  };
+}
+
+function pickFirstValue(entry, keys, fallback = "") {
+  if (!entry || typeof entry !== "object") {
+    return fallback;
+  }
+
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(entry, key)) {
+      continue;
+    }
+    const value = entry[key];
+    if (value === null || value === undefined) {
+      continue;
+    }
+    if (typeof value === "string" && value.trim() === "") {
+      continue;
+    }
+    return value;
+  }
+
+  return fallback;
+}
+
+function pickFirstNumber(entry, keys, fallback = 0) {
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(entry, key)) {
+      continue;
+    }
+    const value = Number(entry[key]);
+    if (Number.isFinite(value)) {
+      return value;
+    }
+  }
+
+  return fallback;
+}
+
+function normalizeConfidence(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return null;
+  }
+
+  if (numericValue >= 0 && numericValue <= 1) {
+    return numericValue * 100;
+  }
+
+  return Math.max(0, Math.min(100, numericValue));
+}
+
+function normalizeDateTimeValue(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  const parsed = parseDateValue(raw);
+  if (!parsed || Number.isNaN(parsed.getTime())) {
+    return raw;
+  }
+
+  return parsed.toISOString();
+}
+
+function parseDateValue(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    const millis = numeric > 10_000_000_000 ? numeric : numeric * 1000;
+    const numericDate = new Date(millis);
+    if (!Number.isNaN(numericDate.getTime())) {
+      return numericDate;
+    }
+  }
+
+  const parsedMillis = Date.parse(raw);
+  if (Number.isFinite(parsedMillis)) {
+    return new Date(parsedMillis);
+  }
+
+  return null;
 }
 
 function extractExchangeSync(payload, exchange) {
@@ -2711,7 +3604,10 @@ async function apiFetchFromBase(endpoint, apiBase, options = {}, clearAuthOnUnau
       clearAuthToken();
       renderAuthUi();
     }
-    throw new Error(payload.error || `Request failed (${response.status})`);
+    const requestError = new Error(payload.error || `Request failed (${response.status})`);
+    requestError.status = response.status;
+    requestError.payload = payload;
+    throw requestError;
   }
 
   return payload;
@@ -2839,8 +3735,33 @@ function formatTime(value) {
   return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function formatDateTime(value) {
+  const parsed = parseDateValue(value);
+  if (!parsed || Number.isNaN(parsed.getTime())) {
+    const fallback = String(value ?? "").trim();
+    return fallback || "-";
+  }
+
+  return parsed.toLocaleString([], {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
 function formatShortDate(value) {
   return new Date(value).toLocaleDateString([], { day: "2-digit", month: "short", year: "numeric" });
+}
+
+function formatCount(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return "0";
+  }
+
+  return Math.max(0, Math.round(numeric)).toLocaleString();
 }
 
 function parseNotificationTimestamp(value) {

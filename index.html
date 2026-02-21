@@ -112,6 +112,73 @@
           <div class="kpi-grid" id="kpi-grid"></div>
 
           <div class="broker-lanes" id="broker-lanes"></div>
+
+          <div class="extraction-workspace">
+            <article class="panel">
+              <header>Extraction Runs</header>
+              <div class="panel-body">
+                <div class="extraction-toolbar">
+                  <button id="run-extraction-btn" class="btn" type="button">Run extraction now</button>
+                  <button id="refresh-extraction-btn" class="btn" type="button">Refresh status</button>
+                </div>
+                <div id="extraction-status-note" class="note">Checking extraction endpoints...</div>
+                <div id="extraction-last-run" class="note"></div>
+                <div class="table-wrap">
+                  <table class="data-table">
+                    <thead>
+                      <tr>
+                        <th>Started</th>
+                        <th>Status</th>
+                        <th>Processed</th>
+                        <th>Extracted</th>
+                        <th>Duplicates</th>
+                      </tr>
+                    </thead>
+                    <tbody id="extraction-runs-table"></tbody>
+                  </table>
+                </div>
+              </div>
+            </article>
+
+            <article class="panel">
+              <header>Extracted Reports</header>
+              <div class="panel-body">
+                <div class="extraction-filters">
+                  <label>
+                    Broker
+                    <select id="extracted-filter-broker"></select>
+                  </label>
+                  <label>
+                    Company
+                    <input id="extracted-filter-company" type="search" placeholder="Reliance, ICICI..." />
+                  </label>
+                  <label>
+                    Report Type
+                    <select id="extracted-filter-type"></select>
+                  </label>
+                  <button id="refresh-extracted-btn" class="btn" type="button">Refresh extracted list</button>
+                </div>
+                <div id="extracted-reports-meta" class="note"></div>
+                <div class="table-wrap">
+                  <table class="data-table">
+                    <thead>
+                      <tr>
+                        <th>Date</th>
+                        <th>Broker</th>
+                        <th>Company</th>
+                        <th>Type</th>
+                        <th>Title</th>
+                        <th>Summary</th>
+                        <th>Confidence</th>
+                        <th>Source</th>
+                      </tr>
+                    </thead>
+                    <tbody id="extracted-reports-table"></tbody>
+                  </table>
+                </div>
+              </div>
+            </article>
+          </div>
             </section>
 
             <section id="view-archive" class="view">
@@ -393,6 +460,6 @@
       </section>
     </div>
 
-    <script src="./app.js?v=20260220-1536" type="module"></script>
+    <script src="./app.js?v=20260220-1810" type="module"></script>
   </body>
 </html>
