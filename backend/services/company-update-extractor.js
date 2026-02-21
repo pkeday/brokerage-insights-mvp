@@ -371,7 +371,6 @@ export function createCompanyUpdateExtractor(options = {}) {
         },
         body: JSON.stringify({
           model,
-          temperature: 0.1,
           max_output_tokens: 1800,
           input: [
             {

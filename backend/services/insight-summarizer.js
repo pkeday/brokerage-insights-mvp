@@ -213,7 +213,6 @@ async function generateOpenAiSummary(report, archive, config) {
       },
       body: JSON.stringify({
         model: config.model,
-        temperature: 0.15,
         max_output_tokens: 220,
         input: [
           {
