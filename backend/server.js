@@ -59,7 +59,7 @@ const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim() || "";
 const googleRedirectUri = process.env.GOOGLE_REDIRECT_URI?.trim() || "";
 const googleScopes =
   process.env.GOOGLE_OAUTH_SCOPES?.trim() ||
-  "openid email profile https://www.googleapis.com/auth/gmail.readonly";
+  "openid email profile https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send";
 const databaseUrl = process.env.DATABASE_URL?.trim() || "";
 const databaseSslMode = (process.env.DATABASE_SSL_MODE || (isProduction ? "require" : "disable")).trim().toLowerCase();
 const databaseMaxConnections = Number.parseInt(process.env.DATABASE_MAX_CONNECTIONS ?? "5", 10);
@@ -1032,9 +1032,10 @@ function detectBroker(fromHeader, brokerMappings) {
   return "Unmapped Broker";
 }
 
-async function gmailApiGet(accessToken, endpoint, query = undefined) {
+async function gmailApiRequest(accessToken, endpoint, options = {}) {
   const url = new URL(`https://gmail.googleapis.com/gmail/v1/users/me/${endpoint}`);
-  if (query) {
+  const query = options.query;
+  if (query && typeof query === "object") {
     for (const [key, value] of Object.entries(query)) {
       if (value === undefined || value === null || value === "") {
         continue;
@@ -1054,11 +1055,24 @@ async function gmailApiGet(accessToken, endpoint, query = undefined) {
     }
   }
 
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`
+  const method = options.method || "GET";
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    ...(options.headers || {})
+  };
+  const request = {
+    method,
+    headers
+  };
+
+  if (options.body !== undefined) {
+    request.body = JSON.stringify(options.body);
+    if (!request.headers["Content-Type"]) {
+      request.headers["Content-Type"] = "application/json";
     }
-  });
+  }
+
+  const response = await fetch(url, request);
 
   const data = await response.json();
   if (!response.ok) {
@@ -1066,6 +1080,13 @@ async function gmailApiGet(accessToken, endpoint, query = undefined) {
   }
 
   return data;
+}
+
+async function gmailApiGet(accessToken, endpoint, query = undefined) {
+  return gmailApiRequest(accessToken, endpoint, {
+    method: "GET",
+    query
+  });
 }
 
 function getHeader(headers, name) {
@@ -1788,6 +1809,58 @@ async function runGmailIngestForUser(params) {
   };
 }
 
+function toArchiveIdList(items) {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+
+  const unique = new Set();
+  for (const item of items) {
+    const archiveId = String(item?.id ?? "").trim();
+    if (archiveId) {
+      unique.add(archiveId);
+    }
+  }
+
+  return [...unique];
+}
+
+async function queueExtractionFromArchiveIds(userId, archiveIds, trigger) {
+  const normalizedUserId = String(userId ?? "").trim();
+  if (!normalizedUserId) {
+    return {
+      queued: false,
+      reason: "missing_user",
+      run: null
+    };
+  }
+
+  const ids = Array.isArray(archiveIds)
+    ? [...new Set(archiveIds.map((entry) => String(entry ?? "").trim()).filter(Boolean))]
+    : [];
+  if (ids.length === 0) {
+    return {
+      queued: false,
+      reason: "no_archives",
+      run: null
+    };
+  }
+
+  const run = await extractionOrchestrator.triggerRun({
+    userId: normalizedUserId,
+    archiveIds: ids,
+    limit: Math.max(1, Math.min(1000, ids.length)),
+    includeAlreadyExtracted: false,
+    trigger: String(trigger || "ingest_auto")
+  });
+
+  return {
+    queued: true,
+    reason: "queued",
+    run
+  };
+}
+
 async function runScheduledIngests(trigger = "scheduled") {
   const now = new Date();
   const details = [];
@@ -1795,6 +1868,8 @@ async function runScheduledIngests(trigger = "scheduled") {
   let successfulRuns = 0;
   let failedRuns = 0;
   let archivedCount = 0;
+  let extractionQueuedRuns = 0;
+  let extractionFailedRuns = 0;
 
   for (const connection of db.gmailConnections) {
     const user = getUserById(connection.userId);
@@ -1821,15 +1896,44 @@ async function runScheduledIngests(trigger = "scheduled") {
         connection,
         includeAttachments: true
       });
+      let extraction = {
+        queued: false,
+        reason: "no_archives",
+        run: null,
+        error: null
+      };
+      try {
+        extraction = await queueExtractionFromArchiveIds(
+          user.id,
+          toArchiveIdList(ingest.items),
+          "scheduled_ingest_auto_extract"
+        );
+      } catch (error) {
+        extraction = {
+          queued: false,
+          reason: "queue_failed",
+          run: null,
+          error: error instanceof Error ? error.message : "Failed to queue extraction"
+        };
+      }
+
       prefs.lastScheduledRunDate = zoneParts.dateKey;
       successfulRuns += 1;
       archivedCount += ingest.summary.archivedCount;
+      if (extraction.queued) {
+        extractionQueuedRuns += 1;
+      } else if (extraction.error) {
+        extractionFailedRuns += 1;
+      }
       details.push({
         userId: user.id,
         email: user.email,
         status: "ok",
         archivedCount: ingest.summary.archivedCount,
-        fetchedMessages: ingest.summary.fetchedMessages
+        fetchedMessages: ingest.summary.fetchedMessages,
+        extractionQueued: extraction.queued,
+        extractionRunId: extraction.run?.id ?? null,
+        extractionError: extraction.error
       });
     } catch (error) {
       failedRuns += 1;
@@ -1850,6 +1954,8 @@ async function runScheduledIngests(trigger = "scheduled") {
     successfulRuns,
     failedRuns,
     archivedCount,
+    extractionQueuedRuns,
+    extractionFailedRuns,
     details
   };
 }
@@ -1876,12 +1982,34 @@ async function handleGmailIngest(req, res, auth) {
     ingestToDate: body.ingestToDate
   });
 
+  let extraction = {
+    queued: false,
+    reason: "no_archives",
+    run: null,
+    error: null
+  };
+  try {
+    extraction = await queueExtractionFromArchiveIds(
+      auth.user.id,
+      toArchiveIdList(ingest.items),
+      "manual_ingest_auto_extract"
+    );
+  } catch (error) {
+    extraction = {
+      queued: false,
+      reason: "queue_failed",
+      run: null,
+      error: error instanceof Error ? error.message : "Failed to queue extraction"
+    };
+  }
+
   await persistDb();
 
   sendJson(req, res, 200, {
     ok: true,
     summary: ingest.summary,
-    items: ingest.items
+    items: ingest.items,
+    extraction
   });
 }
 
@@ -1903,6 +2031,202 @@ function parseArchiveIdList(value) {
   }
 
   return value.map((entry) => String(entry ?? "").trim()).filter(Boolean);
+}
+
+function parseStringList(value, fallback = []) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => String(entry ?? "").trim()).filter(Boolean);
+  }
+
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+
+  return fallback;
+}
+
+function isLikelyEmail(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value ?? "").trim());
+}
+
+function normalizeCompanyKey(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function buildDigestSubject(now = new Date()) {
+  const dateLabel = now.toLocaleDateString("en-IN", {
+    year: "numeric",
+    month: "short",
+    day: "2-digit"
+  });
+  return `Brokerage Digest - ${dateLabel}`;
+}
+
+function buildDigestEmailHtml(preview) {
+  const sectionHtml = preview.sections
+    .map((section) => {
+      const listHtml = section.items
+        .map(
+          (item) =>
+            `<li><strong>${escapeHtml(item.companyCanonical)} · ${escapeHtml(item.reportType)}</strong> - ${escapeHtml(
+              item.summary
+            )}</li>`
+        )
+        .join("");
+      return `<h3>${escapeHtml(section.broker)}</h3><ul>${listHtml}</ul>`;
+    })
+    .join("");
+
+  return `<!doctype html><html><body>
+    <h2>Brokerage Digest</h2>
+    <p><strong>Generated:</strong> ${escapeHtml(preview.generatedAt)}</p>
+    <p><strong>Reports:</strong> ${preview.totalReports} (duplicates suppressed: ${preview.duplicateSuppressed})</p>
+    <p><strong>Priority hits:</strong> ${preview.priorityHits}</p>
+    ${sectionHtml || "<p>No extracted reports found for the selected filters.</p>"}
+  </body></html>`;
+}
+
+function buildDigestEmailText(preview) {
+  const lines = [
+    "Brokerage Digest",
+    `Generated: ${preview.generatedAt}`,
+    `Reports: ${preview.totalReports} (duplicates suppressed: ${preview.duplicateSuppressed})`,
+    `Priority hits: ${preview.priorityHits}`,
+    ""
+  ];
+
+  for (const section of preview.sections) {
+    lines.push(`${section.broker}`);
+    for (const item of section.items) {
+      lines.push(`- ${item.companyCanonical} | ${item.reportType} | ${item.summary}`);
+    }
+    lines.push("");
+  }
+
+  return lines.join("\n").trim();
+}
+
+function buildRawGmailMessage({ to, subject, textBody, htmlBody }) {
+  const boundary = `digest_${randomBytes(8).toString("hex")}`;
+  const lines = [
+    `To: ${to.join(", ")}`,
+    `Subject: ${subject}`,
+    "MIME-Version: 1.0",
+    `Content-Type: multipart/alternative; boundary=\"${boundary}\"`,
+    "",
+    `--${boundary}`,
+    "Content-Type: text/plain; charset=UTF-8",
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    textBody,
+    "",
+    `--${boundary}`,
+    "Content-Type: text/html; charset=UTF-8",
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    htmlBody,
+    "",
+    `--${boundary}--`,
+    ""
+  ];
+
+  return base64UrlEncode(Buffer.from(lines.join("\r\n"), "utf8"));
+}
+
+function buildDigestPreviewForUser(userId, options = {}) {
+  const limit = Math.max(1, Math.min(500, Number(options.limit ?? 200) || 200));
+  const priorityCompanies = parseStringList(options.priorityCompanies);
+  const ignoredCompanies = parseStringList(options.ignoredCompanies);
+  const priorityRank = new Map(
+    priorityCompanies.map((entry, index) => [normalizeCompanyKey(entry), index])
+  );
+  const ignoredSet = new Set(ignoredCompanies.map((entry) => normalizeCompanyKey(entry)));
+
+  const canonical = extractionOrchestrator.listReports({
+    userId,
+    limit,
+    offset: 0,
+    includeDuplicates: false
+  });
+  const withDuplicates = extractionOrchestrator.listReports({
+    userId,
+    limit,
+    offset: 0,
+    includeDuplicates: true
+  });
+
+  const filtered = canonical.items.filter((item) => {
+    const key = normalizeCompanyKey(item.companyCanonical || item.companyRaw);
+    if (!key) {
+      return true;
+    }
+    return !ignoredSet.has(key);
+  });
+
+  filtered.sort((left, right) => {
+    const leftPriority = priorityRank.get(normalizeCompanyKey(left.companyCanonical || left.companyRaw));
+    const rightPriority = priorityRank.get(normalizeCompanyKey(right.companyCanonical || right.companyRaw));
+    const leftRank = leftPriority === undefined ? Number.MAX_SAFE_INTEGER : leftPriority;
+    const rightRank = rightPriority === undefined ? Number.MAX_SAFE_INTEGER : rightPriority;
+    if (leftRank !== rightRank) {
+      return leftRank - rightRank;
+    }
+    return new Date(right.publishedAt ?? 0).getTime() - new Date(left.publishedAt ?? 0).getTime();
+  });
+
+  const byBroker = new Map();
+  for (const item of filtered) {
+    const broker = String(item.broker || "Unmapped Broker");
+    if (!byBroker.has(broker)) {
+      byBroker.set(broker, []);
+    }
+    byBroker.get(broker).push(item);
+  }
+
+  const sections = [...byBroker.entries()]
+    .sort((left, right) => left[0].localeCompare(right[0]))
+    .map(([broker, items]) => ({
+      broker,
+      items
+    }));
+
+  const priorityHits = filtered.filter((item) =>
+    priorityRank.has(normalizeCompanyKey(item.companyCanonical || item.companyRaw))
+  ).length;
+  const duplicateSuppressed = Math.max(0, withDuplicates.total - canonical.total);
+
+  return {
+    generatedAt: new Date().toISOString(),
+    totalReports: filtered.length,
+    priorityHits,
+    duplicateSuppressed,
+    sections,
+    previewText: buildDigestEmailText({
+      generatedAt: new Date().toISOString(),
+      totalReports: filtered.length,
+      priorityHits,
+      duplicateSuppressed,
+      sections
+    })
+  };
 }
 
 async function handleTriggerExtractionRun(req, res, auth) {
@@ -2004,6 +2328,81 @@ async function handleListExtractedReports(req, res, auth, requestUrl) {
   });
 
   sendJson(req, res, 200, payload);
+}
+
+async function handleDigestPreview(req, res, auth, requestUrl) {
+  const preview = buildDigestPreviewForUser(auth.user.id, {
+    limit: requestUrl.searchParams.get("limit"),
+    priorityCompanies: requestUrl.searchParams.get("priorityCompanies") || "",
+    ignoredCompanies: requestUrl.searchParams.get("ignoredCompanies") || ""
+  });
+
+  sendJson(req, res, 200, {
+    ...preview,
+    htmlPreview: buildDigestEmailHtml(preview)
+  });
+}
+
+async function handleDigestSend(req, res, auth) {
+  const connection = getGoogleConnection(auth.user.id);
+  if (!connection) {
+    sendJson(req, res, 400, { error: "Gmail is not connected for this user." });
+    return;
+  }
+
+  const body = await readJsonBody(req);
+  const recipients = parseStringList(body.recipients).filter((entry) => isLikelyEmail(entry)).slice(0, 25);
+  if (recipients.length === 0) {
+    sendJson(req, res, 400, { error: "Provide at least one valid recipient email." });
+    return;
+  }
+
+  const preview = buildDigestPreviewForUser(auth.user.id, {
+    limit: body.limit,
+    priorityCompanies: body.priorityCompanies,
+    ignoredCompanies: body.ignoredCompanies
+  });
+  const htmlBody = buildDigestEmailHtml(preview);
+  const textBody = buildDigestEmailText(preview);
+  const subject = String(body.subject || buildDigestSubject()).trim();
+  const raw = buildRawGmailMessage({
+    to: recipients,
+    subject: subject || buildDigestSubject(),
+    textBody,
+    htmlBody
+  });
+
+  try {
+    const accessToken = await getValidGoogleAccessToken(connection);
+    const sendResult = await gmailApiRequest(accessToken, "messages/send", {
+      method: "POST",
+      body: { raw }
+    });
+
+    sendJson(req, res, 200, {
+      ok: true,
+      recipients,
+      subject,
+      digest: {
+        totalReports: preview.totalReports,
+        duplicateSuppressed: preview.duplicateSuppressed,
+        priorityHits: preview.priorityHits
+      },
+      gmailMessageId: sendResult.id || null,
+      gmailThreadId: sendResult.threadId || null
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to send digest email";
+    if (message.toLowerCase().includes("insufficient") || message.toLowerCase().includes("permission")) {
+      sendJson(req, res, 403, {
+        error:
+          "Digest send requires Gmail send scope. Reconnect Google so new scopes are granted (gmail.send)."
+      });
+      return;
+    }
+
+    throw error;
+  }
 }
 
 async function handleListEmailArchives(req, res, auth, requestUrl) {
@@ -2238,7 +2637,9 @@ const server = createServer(async (req, res) => {
           "POST /api/extraction/runs",
           "GET /api/extraction/runs",
           "GET /api/extraction/runs/:runId/status",
-          "GET /api/extracted-reports"
+          "GET /api/extracted-reports",
+          "GET /api/digest/preview",
+          "POST /api/digest/send"
         ]
       });
       return;
@@ -2402,6 +2803,28 @@ const server = createServer(async (req, res) => {
 
       if (method === "GET") {
         await handleListExtractedReports(req, res, auth, requestUrl);
+        return;
+      }
+    }
+
+    if (pathName === "/api/digest/preview") {
+      const auth = requireAuth(req, res);
+      if (!auth) {
+        return;
+      }
+      if (method === "GET") {
+        await handleDigestPreview(req, res, auth, requestUrl);
+        return;
+      }
+    }
+
+    if (pathName === "/api/digest/send") {
+      const auth = requireAuth(req, res);
+      if (!auth) {
+        return;
+      }
+      if (method === "POST") {
+        await handleDigestSend(req, res, auth);
         return;
       }
     }

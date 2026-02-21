@@ -317,6 +317,12 @@ const state = {
     selected: "Reliance Industries",
     sort: "latest"
   },
+  digestApi: {
+    loading: false,
+    error: "",
+    lastSentAt: null,
+    preview: null
+  },
   pipelineMessage: ""
 };
 
@@ -491,6 +497,9 @@ function bindEvents() {
       state.section = "brokerage";
       state.view = view;
       renderViewState();
+      if (view === "digest") {
+        void fetchDigestPreviewFromApi();
+      }
     });
   }
 
@@ -585,6 +594,7 @@ function bindEvents() {
       });
 
       const summary = response.summary;
+      const extraction = response.extraction || null;
       const fetchedCount = Number(summary.fetchedMessages || 0);
       const archivedCount = Number(summary.archivedCount || 0);
       const skippedCount = Number(summary.skippedCount || 0);
@@ -595,11 +605,21 @@ function bindEvents() {
           `Ingest complete: fetched 0 messages. Cursor is ${cursorLabel}. If you expected older emails, open Ingest setup and check "Backfill older emails (reset cursor to oldest)".`
         );
       } else {
+        const extractionNote =
+          extraction?.run?.id && extraction?.queued
+            ? ` Extraction queued (${extraction.run.id}).`
+            : "";
         setPipelineMessage(
-          `Ingest complete: fetched ${fetchedCount}, archived ${archivedCount}, skipped ${skippedCount}.`
+          `Ingest complete: fetched ${fetchedCount}, archived ${archivedCount}, skipped ${skippedCount}.${extractionNote}`
         );
       }
       await fetchArchives();
+      if (extraction?.run?.id) {
+        await refreshExtractionWorkspace();
+      }
+      if (state.view === "digest") {
+        await fetchDigestPreviewFromApi();
+      }
       renderAllDataViews();
     } catch (error) {
       setPipelineMessage(`Ingest failed: ${error.message}`);
@@ -609,10 +629,12 @@ function bindEvents() {
   });
 
   refs.sendDigestBtn.addEventListener("click", () => {
-    state.section = "brokerage";
-    state.view = "digest";
-    renderViewState();
-    setPipelineMessage("Digest preview is ready. Email sending pipeline is next.");
+    void (async () => {
+      state.section = "brokerage";
+      state.view = "digest";
+      renderViewState();
+      await sendDigestPreviewNow();
+    })();
   });
 
   refs.filterBroker.addEventListener("change", (event) => {
@@ -1562,7 +1584,55 @@ function renderSettings() {
   refs.scheduleInput.value = state.digestSchedule;
 }
 
+function renderDigestFromApiPreview(preview) {
+  const sections = Array.isArray(preview?.sections) ? preview.sections : [];
+  const generatedAt = preview?.generatedAt ? new Date(preview.generatedAt).toLocaleString() : "unknown";
+  const totalReports = Number(preview?.totalReports || 0);
+  const duplicateSuppressed = Number(preview?.duplicateSuppressed || 0);
+  const priorityHits = Number(preview?.priorityHits || 0);
+
+  return `
+    <div class="digest-block">
+      <h3>Delivery Target</h3>
+      <p><strong>Recipients:</strong> ${escapeHtml(state.digestRecipients.join(", ") || "none")}</p>
+      <p><strong>Schedule:</strong> ${escapeHtml(state.digestSchedule)}</p>
+      <p><strong>Generated:</strong> ${escapeHtml(generatedAt)}</p>
+      <p><strong>Status:</strong> ${state.digestApi.loading ? "sending..." : state.digestApi.lastSentAt ? "last sent" : "preview ready"}</p>
+    </div>
+    <div class="digest-block">
+      <h3>Digest Stats</h3>
+      <p><strong>Total reports:</strong> ${totalReports}</p>
+      <p><strong>Priority hits:</strong> ${priorityHits}</p>
+      <p><strong>Duplicates suppressed:</strong> ${duplicateSuppressed}</p>
+    </div>
+    ${sections
+      .map((section) => {
+        const items = Array.isArray(section.items) ? section.items : [];
+        const listHtml = items
+          .map(
+            (item) =>
+              `<li><strong>${escapeHtml(item.companyCanonical)} · ${escapeHtml(item.reportType)}:</strong> ${escapeHtml(item.summary)}</li>`
+          )
+          .join("");
+        return `
+          <div class="digest-block">
+            <h3>${escapeHtml(section.broker || "Unmapped Broker")}</h3>
+            <ul class="digest-list">${listHtml || "<li>No items</li>"}</ul>
+          </div>
+        `;
+      })
+      .join("")}
+    ${state.digestApi.error ? `<div class="message-toast">${escapeHtml(state.digestApi.error)}</div>` : ""}
+    ${state.pipelineMessage ? `<div class="message-toast">${escapeHtml(state.pipelineMessage)}</div>` : ""}
+  `;
+}
+
 function renderDigest() {
+  if (state.digestApi.preview) {
+    refs.digestPreview.innerHTML = renderDigestFromApiPreview(state.digestApi.preview);
+    return;
+  }
+
   const reports = buildReports()
     .filter((report) => !report.duplicateOf)
     .filter((report) => !state.ignoredCompanies.includes(report.canonicalCompany));
@@ -1620,6 +1690,100 @@ function renderDigest() {
 
     ${state.pipelineMessage ? `<div class="message-toast">${escapeHtml(state.pipelineMessage)}</div>` : ""}
   `;
+}
+
+function buildDigestPreferencePayload() {
+  return {
+    priorityCompanies: [...state.priorityCompanies],
+    ignoredCompanies: [...state.ignoredCompanies],
+    limit: 250
+  };
+}
+
+async function fetchDigestPreviewFromApi() {
+  if (!state.auth.token) {
+    state.digestApi.preview = null;
+    state.digestApi.error = "Sign in with Google to load digest from extracted reports.";
+    renderDigest();
+    return null;
+  }
+
+  state.digestApi.loading = true;
+  state.digestApi.error = "";
+  renderDigest();
+  try {
+    const prefs = buildDigestPreferencePayload();
+    const params = new URLSearchParams();
+    params.set("priorityCompanies", prefs.priorityCompanies.join(","));
+    params.set("ignoredCompanies", prefs.ignoredCompanies.join(","));
+    params.set("limit", String(prefs.limit));
+    const preview = await apiFetch(`/api/digest/preview?${params.toString()}`);
+    state.digestApi.preview = preview;
+    state.digestApi.error = "";
+    return preview;
+  } catch (error) {
+    state.digestApi.preview = null;
+    state.digestApi.error = error instanceof Error ? error.message : "Failed to load digest preview";
+    return null;
+  } finally {
+    state.digestApi.loading = false;
+    renderDigest();
+  }
+}
+
+async function sendDigestPreviewNow() {
+  state.section = "brokerage";
+  state.view = "digest";
+  renderViewState();
+
+  if (!state.auth.token) {
+    setPipelineMessage("Sign in with Google before sending digest.");
+    state.digestApi.error = "Digest send requires Google sign-in.";
+    renderDigest();
+    return;
+  }
+
+  if (state.digestRecipients.length === 0) {
+    setPipelineMessage("Add at least one digest recipient in Settings.");
+    state.digestApi.error = "No digest recipients configured.";
+    renderDigest();
+    return;
+  }
+
+  const preview = await fetchDigestPreviewFromApi();
+  if (!preview) {
+    setPipelineMessage("Digest preview failed. Fix the error and retry.");
+    return;
+  }
+
+  state.digestApi.loading = true;
+  state.digestApi.error = "";
+  renderDigest();
+
+  try {
+    const prefs = buildDigestPreferencePayload();
+    const payload = await apiFetch("/api/digest/send", {
+      method: "POST",
+      body: JSON.stringify({
+        recipients: [...state.digestRecipients],
+        priorityCompanies: prefs.priorityCompanies,
+        ignoredCompanies: prefs.ignoredCompanies,
+        limit: prefs.limit
+      })
+    });
+    state.digestApi.lastSentAt = new Date().toISOString();
+    setPipelineMessage(
+      `Digest sent to ${payload.recipients?.length || state.digestRecipients.length} recipients (reports: ${
+        payload.digest?.totalReports ?? 0
+      }, duplicates suppressed: ${payload.digest?.duplicateSuppressed ?? 0}).`
+    );
+  } catch (error) {
+    state.digestApi.error = error instanceof Error ? error.message : "Digest send failed";
+    setPipelineMessage(`Digest send failed: ${state.digestApi.error}`);
+  } finally {
+    state.digestApi.loading = false;
+    renderDigest();
+  }
 }
 
 function renderNotifications() {
@@ -2258,6 +2422,9 @@ async function refreshAuthState() {
     state.auth.user = null;
     state.auth.gmailConnected = false;
     state.auth.ingestionPreferences = null;
+    state.digestApi.preview = null;
+    state.digestApi.error = "";
+    state.digestApi.lastSentAt = null;
     state.archives.items = [];
     state.archives.total = 0;
     resetExtractionStateForSignedOut();
@@ -2292,11 +2459,17 @@ async function refreshAuthState() {
 
     await fetchArchives();
     await refreshExtractionWorkspace();
+    if (state.view === "digest") {
+      await fetchDigestPreviewFromApi();
+    }
   } catch {
     clearAuthToken();
     state.auth.user = null;
     state.auth.gmailConnected = false;
     state.auth.ingestionPreferences = null;
+    state.digestApi.preview = null;
+    state.digestApi.error = "";
+    state.digestApi.lastSentAt = null;
     resetExtractionStateForSignedOut();
     setPipelineMessage("Session expired. Please sign in with Google again.");
   } finally {
@@ -2337,6 +2510,9 @@ async function signOut() {
   state.auth.user = null;
   state.auth.gmailConnected = false;
   state.auth.ingestionPreferences = null;
+  state.digestApi.preview = null;
+  state.digestApi.error = "";
+  state.digestApi.lastSentAt = null;
   state.archives.items = [];
   state.archives.total = 0;
   resetExtractionStateForSignedOut();
