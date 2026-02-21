@@ -284,6 +284,7 @@ const state = {
     },
     statusMessage: "Checking extraction endpoints...",
     runStarting: false,
+    reprocessExisting: false,
     runsLoading: false,
     reportsLoading: false,
     runsError: "",
@@ -365,6 +366,7 @@ const refs = {
   brokerLanes: document.getElementById("broker-lanes"),
   runExtractionBtn: document.getElementById("run-extraction-btn"),
   refreshExtractionBtn: document.getElementById("refresh-extraction-btn"),
+  extractionReprocessExisting: document.getElementById("extraction-reprocess-existing"),
   extractionStatusNote: document.getElementById("extraction-status-note"),
   extractionLastRun: document.getElementById("extraction-last-run"),
   extractionRunsTable: document.getElementById("extraction-runs-table"),
@@ -642,6 +644,12 @@ function bindEvents() {
   if (refs.refreshExtractionBtn) {
     refs.refreshExtractionBtn.addEventListener("click", async () => {
       await refreshExtractionWorkspace();
+    });
+  }
+
+  if (refs.extractionReprocessExisting) {
+    refs.extractionReprocessExisting.addEventListener("change", (event) => {
+      state.extraction.reprocessExisting = event.target.checked;
     });
   }
 
@@ -1145,6 +1153,11 @@ function renderExtractionWorkspace() {
 
   if (refs.refreshExtractionBtn) {
     refs.refreshExtractionBtn.disabled = state.extraction.runStarting || state.extraction.runsLoading || state.extraction.reportsLoading;
+  }
+
+  if (refs.extractionReprocessExisting) {
+    refs.extractionReprocessExisting.disabled = state.extraction.runStarting;
+    refs.extractionReprocessExisting.checked = state.extraction.reprocessExisting === true;
   }
 
   if (refs.refreshExtractedBtn) {
@@ -2437,7 +2450,13 @@ async function triggerExtractionRun() {
   renderExtractionWorkspace();
 
   try {
-    const result = await callExtractionEndpoint("trigger", { method: "POST" });
+    const result = await callExtractionEndpoint("trigger", {
+      method: "POST",
+      body: JSON.stringify({
+        includeAlreadyExtracted: state.extraction.reprocessExisting === true,
+        trigger: state.extraction.reprocessExisting ? "manual_api_reprocess" : "manual_api"
+      })
+    });
     if (result.ok) {
       const normalized = normalizeExtractionRunsPayload(result.payload);
       if (normalized.lastRun) {
