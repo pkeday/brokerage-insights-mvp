@@ -1138,15 +1138,38 @@ function renderDashboard() {
 
   refs.brokerLanes.innerHTML = brokers
     .map((broker, index) => {
-      const cards = grouped[broker]
-        .sort((a, b) => b.timestamp - a.timestamp)
-        .map((report) => renderReportCard(report))
+      const brokerReports = grouped[broker].sort((a, b) => b.timestamp - a.timestamp);
+      const canonicalCount = brokerReports.filter((report) => !report.duplicateOf).length;
+      const duplicateCountForBroker = Math.max(0, brokerReports.length - canonicalCount);
+      const uniqueCompanies = new Set(brokerReports.map((report) => report.canonicalCompany)).size;
+      const priorityHitsForBroker = brokerReports.filter(
+        (report) => !report.duplicateOf && state.priorityCompanies.includes(report.canonicalCompany)
+      ).length;
+      const latest = brokerReports[0];
+      const typeCounts = Object.entries(groupBy(brokerReports, "type"))
+        .sort((left, right) => right[1].length - left[1].length)
+        .slice(0, 4);
+
+      const typeCountHtml = typeCounts
+        .map(([type, reports]) => `<span class="broker-count-chip">${escapeHtml(type)}: ${reports.length}</span>`)
         .join("");
 
       return `
         <section class="lane broker-${(index % 3) + 1}">
           <header>${escapeHtml(broker)} · Distinct Broker Lane</header>
-          <div class="lane-body">${cards}</div>
+          <div class="lane-body">
+            <article class="broker-summary-card">
+              <div class="broker-summary-grid">
+                <div><strong>Total:</strong> ${brokerReports.length}</div>
+                <div><strong>Canonical:</strong> ${canonicalCount}</div>
+                <div><strong>Duplicates:</strong> ${duplicateCountForBroker}</div>
+                <div><strong>Companies:</strong> ${uniqueCompanies}</div>
+                <div><strong>Priority hits:</strong> ${priorityHitsForBroker}</div>
+                <div><strong>Latest:</strong> ${escapeHtml(formatDateTime(latest?.time || latest?.publishedAt || ""))}</div>
+              </div>
+              <div class="broker-count-row">${typeCountHtml || '<span class="broker-count-chip">No report types</span>'}</div>
+            </article>
+          </div>
         </section>
       `;
     })

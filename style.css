@@ -672,6 +672,37 @@ input[type="checkbox"] {
   gap: 8px;
 }
 
+.broker-summary-card {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px;
+  background: #fff;
+}
+
+.broker-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(120px, 1fr));
+  gap: 6px 10px;
+  font-size: 12px;
+  color: #2d453e;
+}
+
+.broker-count-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.broker-count-chip {
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 10px;
+  color: #325248;
+  background: #f4faf7;
+}
+
 .report-card {
   border: 1px solid var(--line);
   border-radius: 6px;
