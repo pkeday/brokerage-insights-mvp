@@ -2021,7 +2021,10 @@ async function handleResetPipelineData(req, res, auth) {
   const force = body.force === true;
   const activeStatuses = new Set(["queued", "running"]);
   const activeRuns = db.extractionRuns.filter(
-    (entry) => entry.userId === auth.user.id && activeStatuses.has(String(entry.status || "").toLowerCase())
+    (entry) =>
+      entry.userId === auth.user.id &&
+      activeStatuses.has(String(entry.status || "").toLowerCase()) &&
+      !entry.abortRequestedAt
   );
 
   if (activeRuns.length > 0 && !force) {

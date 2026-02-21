@@ -2554,15 +2554,8 @@ async function resetPipelineDataForCurrentUser() {
         throw error;
       }
 
-      const forceConfirm = window.confirm(
-        "An extraction run is still active. Force reset will abort active runs and clear data now. Continue?"
-      );
-      if (!forceConfirm) {
-        state.ingestSetup.statusMessage = "Reset cancelled. Abort active run first, then retry.";
-        renderIngestSetupModal();
-        return;
-      }
-
+      state.ingestSetup.statusMessage = "Active extraction detected. Retrying reset with force abort...";
+      renderIngestSetupModal();
       payload = await executeReset(true);
     }
 
