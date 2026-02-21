@@ -2168,7 +2168,6 @@ async function handlePutGmailPreferences(req, res, auth) {
 }
 
 async function runGmailIngestForUser(params) {
-  const nowEpoch = Math.floor(Date.now() / 1000);
   const labelIds = sanitizeLabelList(params.labelIds ?? params.prefs.trackedLabelIds);
   const trackedLabelIds = sanitizeLabelList(params.prefs.trackedLabelIds);
   const trackedLabelNames = sanitizeLabelList(params.prefs.trackedLabelNames);
@@ -2205,58 +2204,114 @@ async function runGmailIngestForUser(params) {
   const ingestToDate = normalizeDateOnly(params.ingestToDate ?? params.prefs.ingestToDate);
   const query = composeIngestQuery(explicitQuery, startAfterEpoch, ingestFromDate, ingestToDate);
   const accessToken = await getValidGoogleAccessToken(params.connection);
+  const pageSize = Math.max(10, Math.min(100, maxResults * 2));
+  const maxMessagesToInspect = Math.max(maxResults, Math.min(2000, maxResults * 20));
+  const maxPages = 20;
+  const existingArchiveByMessageId = new Map(
+    db.emailArchives
+      .filter((entry) => entry.userId === params.user.id)
+      .map((entry) => [String(entry.gmailMessageId ?? ""), entry])
+  );
 
-  const listResponse = await gmailApiGet(accessToken, "messages", {
-    maxResults,
-    q: query,
-    labelIds
-  });
-
-  const messages = Array.isArray(listResponse.messages) ? listResponse.messages : [];
+  let pageToken = null;
+  let pagesScanned = 0;
+  let fetchedMessages = 0;
   const results = [];
-
   let archivedCount = 0;
   let skippedCount = 0;
   let skippedUnmappedCount = 0;
+  let alreadyArchivedCount = 0;
   let attachmentCount = 0;
   let newestInternalEpoch = 0;
+  let nextPageToken = null;
+  let reachedArchiveLimit = false;
+  let reachedInspectLimit = false;
 
-  for (const messageStub of messages) {
-    const full = await gmailApiGet(accessToken, `messages/${messageStub.id}`, { format: "full" });
-    const raw = await gmailApiGet(accessToken, `messages/${messageStub.id}`, { format: "raw" });
+  while (pagesScanned < maxPages && fetchedMessages < maxMessagesToInspect && archivedCount < maxResults) {
+    const listResponse = await gmailApiGet(accessToken, "messages", {
+      maxResults: pageSize,
+      q: query,
+      labelIds,
+      pageToken
+    });
+    const messages = Array.isArray(listResponse.messages) ? listResponse.messages : [];
+    nextPageToken =
+      typeof listResponse.nextPageToken === "string" && listResponse.nextPageToken.trim()
+        ? listResponse.nextPageToken
+        : null;
+    pagesScanned += 1;
 
-    const from = getHeader(full.payload?.headers, "From");
-    const sender = parseFromHeader(from);
-    const messageLabelIds = Array.isArray(full.labelIds) ? full.labelIds.map((value) => String(value)) : [];
-    let broker = null;
-    for (const labelId of labelIds) {
-      if (messageLabelIds.includes(labelId)) {
-        broker = labelBrokerMap.get(labelId) || labelId;
+    if (messages.length === 0) {
+      break;
+    }
+
+    for (const messageStub of messages) {
+      fetchedMessages += 1;
+      const gmailMessageId = String(messageStub.id ?? "");
+      const existing = existingArchiveByMessageId.get(gmailMessageId);
+      if (existing) {
+        skippedCount += 1;
+        alreadyArchivedCount += 1;
+        const existingEpoch = Math.floor(Number(existing.internalDateMs ?? 0) / 1000);
+        if (Number.isFinite(existingEpoch) && existingEpoch > 0) {
+          newestInternalEpoch = Math.max(newestInternalEpoch, existingEpoch);
+        }
+      } else {
+        const full = await gmailApiGet(accessToken, `messages/${gmailMessageId}`, { format: "full" });
+        const raw = await gmailApiGet(accessToken, `messages/${gmailMessageId}`, { format: "raw" });
+
+        const from = getHeader(full.payload?.headers, "From");
+        const sender = parseFromHeader(from);
+        const messageLabelIds = Array.isArray(full.labelIds) ? full.labelIds.map((value) => String(value)) : [];
+        let broker = null;
+        for (const labelId of labelIds) {
+          if (messageLabelIds.includes(labelId)) {
+            broker = labelBrokerMap.get(labelId) || labelId;
+            break;
+          }
+        }
+        if (!broker) {
+          broker = detectBroker(`${from} ${sender.email}`, params.prefs.brokerMappings);
+        }
+        const internalEpoch = Math.floor(Number(full.internalDate ?? Date.now()) / 1000);
+        newestInternalEpoch = Math.max(newestInternalEpoch, internalEpoch);
+
+        const archived = await archiveGmailMessage(params.user, full, raw, includeAttachments, accessToken, broker);
+
+        if (!archived.archived) {
+          skippedCount += 1;
+          if (archived.skippedReason === "already_archived") {
+            alreadyArchivedCount += 1;
+          }
+          continue;
+        }
+
+        archivedCount += 1;
+        attachmentCount += archived.record.attachments.length;
+        results.push(makeArchivePublicRecord(archived.record));
+        existingArchiveByMessageId.set(gmailMessageId, archived.record);
+      }
+
+      if (archivedCount >= maxResults) {
+        reachedArchiveLimit = true;
+        break;
+      }
+      if (fetchedMessages >= maxMessagesToInspect) {
+        reachedInspectLimit = true;
         break;
       }
     }
-    if (!broker) {
-      broker = detectBroker(`${from} ${sender.email}`, params.prefs.brokerMappings);
+
+    if (reachedArchiveLimit || reachedInspectLimit || !nextPageToken) {
+      break;
     }
-    const internalEpoch = Math.floor(Number(full.internalDate ?? Date.now()) / 1000);
-    newestInternalEpoch = Math.max(newestInternalEpoch, internalEpoch);
-
-    const archived = await archiveGmailMessage(params.user, full, raw, includeAttachments, accessToken, broker);
-
-    if (!archived.archived) {
-      skippedCount += 1;
-      continue;
-    }
-
-    archivedCount += 1;
-    attachmentCount += archived.record.attachments.length;
-    results.push(makeArchivePublicRecord(archived.record));
+    pageToken = nextPageToken;
   }
 
-  const skippedOnlyUnmapped = messages.length > 0 && archivedCount === 0 && skippedUnmappedCount === messages.length;
-  const cursorAdvanced = !skippedOnlyUnmapped && messages.length > 0;
+  const skippedOnlyUnmapped = fetchedMessages > 0 && archivedCount === 0 && skippedUnmappedCount === fetchedMessages;
+  const cursorAdvanced = !skippedOnlyUnmapped && fetchedMessages > 0;
   if (cursorAdvanced) {
-    params.prefs.lastIngestAfterEpoch = Math.max(startAfterEpoch, newestInternalEpoch, nowEpoch);
+    params.prefs.lastIngestAfterEpoch = Math.max(startAfterEpoch, newestInternalEpoch);
   }
   params.prefs.lastIngestAt = new Date().toISOString();
   params.prefs.updatedAt = new Date().toISOString();
@@ -2265,10 +2320,17 @@ async function runGmailIngestForUser(params) {
     summary: {
       queryUsed: query,
       requestedMaxResults: maxResults,
-      fetchedMessages: messages.length,
+      fetchedMessages,
       archivedCount,
       skippedCount,
       skippedUnmappedCount,
+      alreadyArchivedCount,
+      pagesScanned,
+      pageSize,
+      nextPageAvailable: Boolean(nextPageToken),
+      reachedArchiveLimit,
+      reachedInspectLimit,
+      maxMessagesToInspect,
       cursorAdvanced,
       attachmentCount,
       trackedLabels: labelIds,
