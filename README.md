@@ -46,4 +46,25 @@ python3 -m http.server 5173
 
 ## Notes
 
-- This is currently MVP code; next phase is normalized insight tables and AI extraction jobs.
+- This is currently MVP code with Phase 2 schema/jobs foundations added.
+
+## Phase 2 schema + jobs
+
+Normalized extraction schema and job-run tracking are now defined under:
+- `backend/sql/`
+- `backend/migrations/`
+- `backend/jobs/extractionRunsStore.js`
+
+Detailed table definitions and usage notes:
+- `docs/PHASE2_SCHEMA_JOBS.md`
+
+Apply migrations (in order):
+
+```bash
+export DATABASE_URL='postgres://...'
+
+psql "$DATABASE_URL" -f backend/migrations/001_create_extraction_runs.sql
+psql "$DATABASE_URL" -f backend/migrations/002_create_archive_ingest_index.sql
+psql "$DATABASE_URL" -f backend/migrations/003_create_extracted_reports.sql
+psql "$DATABASE_URL" -f backend/migrations/004_create_extracted_report_points.sql
+```
