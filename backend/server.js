@@ -1239,17 +1239,21 @@ function composeIngestQuery(baseQuery, afterEpoch, ingestFromDate = null, ingest
     chunks.push(baseQuery.trim());
   }
 
-  let effectiveAfterEpoch = Number.isFinite(afterEpoch) && afterEpoch > 0 ? Math.floor(afterEpoch) : 0;
   const fromEpoch = dateOnlyToEpochStart(ingestFromDate);
-  if (Number.isFinite(fromEpoch)) {
-    effectiveAfterEpoch = Math.max(effectiveAfterEpoch, fromEpoch);
+  const beforeEpoch = dateOnlyToEpochEndExclusive(ingestToDate);
+  const hasExplicitDateBoundary = Number.isFinite(fromEpoch) || Number.isFinite(beforeEpoch);
+  // If user provides any date boundary, prefer that over moving cursor to avoid contradictory queries.
+  let effectiveAfterEpoch = 0;
+  if (hasExplicitDateBoundary) {
+    effectiveAfterEpoch = Number.isFinite(fromEpoch) ? Math.floor(fromEpoch) : 0;
+  } else if (Number.isFinite(afterEpoch) && afterEpoch > 0) {
+    effectiveAfterEpoch = Math.floor(afterEpoch);
   }
 
   if (effectiveAfterEpoch > 0) {
     chunks.push(`after:${effectiveAfterEpoch}`);
   }
 
-  const beforeEpoch = dateOnlyToEpochEndExclusive(ingestToDate);
   if (Number.isFinite(beforeEpoch) && beforeEpoch > 0) {
     chunks.push(`before:${beforeEpoch}`);
   }
