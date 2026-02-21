@@ -2764,21 +2764,35 @@ async function refreshAuthState() {
 }
 
 async function startGoogleAuth() {
-  try {
-    const redirectUri = `${window.location.origin}${window.location.pathname}`;
-    const response = await fetch(
-      `${getApiBase()}/api/auth/google/url?redirect_uri=${encodeURIComponent(redirectUri)}`
-    );
+  const redirectUri = `${window.location.origin}${window.location.pathname}`;
+  const preferredBase = getApiBase();
+  const candidates = [...new Set([preferredBase, defaultApiBase].map((value) => String(value || "").replace(/\/$/, "")).filter(Boolean))];
+  const errors = [];
 
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(payload.error || "Unable to start Google auth flow");
+  for (const base of candidates) {
+    try {
+      const response = await fetch(`${base}/api/auth/google/url?redirect_uri=${encodeURIComponent(redirectUri)}`);
+      const payload = await response.json();
+      if (!response.ok || !payload?.authUrl) {
+        const message = payload?.error || `HTTP ${response.status}`;
+        throw new Error(message);
+      }
+
+      if (base !== preferredBase) {
+        state.apiBase = base;
+        localStorage.setItem(STORAGE_KEYS.apiBase, base);
+        refs.backendStatus.textContent = "Backend status: fallback API selected";
+      }
+
+      window.location.assign(payload.authUrl);
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      errors.push(`${base}: ${message}`);
     }
-
-    window.location.assign(payload.authUrl);
-  } catch (error) {
-    setPipelineMessage(`Google auth start failed: ${error.message}`);
   }
+
+  setPipelineMessage(`Google auth start failed: ${errors.join(" | ")}`);
 }
 
 async function signOut() {
